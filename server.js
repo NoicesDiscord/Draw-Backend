@@ -22,6 +22,25 @@ io.on('connection', (socket) => {
   socket.on('draw', (data) => socket.broadcast.emit('draw', data));
   socket.on('stop', () => socket.broadcast.emit('stop'));
 
+  io.on('connection', (socket) => {
+  console.log('A player connected:', socket.id);
+
+  // Existing drawing listeners...
+  socket.on('start', (data) => socket.broadcast.emit('start', data));
+  socket.on('draw', (data) => socket.broadcast.emit('draw', data));
+  socket.on('stop', () => socket.broadcast.emit('stop'));
+
+  // NEW: Chat listener
+  socket.on('chat_message', (data) => {
+    // When the server receives a message, broadcast it to EVERYONE in the room (including the sender)
+    io.emit('chat_message', data);
+  });
+
+  socket.on('disconnect', () => {
+    console.log('Player disconnected:', socket.id);
+  });
+});
+
   socket.on('disconnect', () => {
     console.log('Player disconnected:', socket.id);
   });
