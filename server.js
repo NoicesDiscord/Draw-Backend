@@ -85,7 +85,7 @@ io.on('connection', (socket) => {
       io.emit('chat_message', { sender: player.name, text: text, isGuess: true });
       
       // NEW: Check if this player just reached 100 points
-      if (player.score >= 100) {
+      if (player.score >= 30) {
         io.emit('game_over', player.name);
         
         // Reset all scores to 0 for the next match
