@@ -71,6 +71,9 @@ io.on('connection', (socket) => {
   socket.on('start', (data) => { if(socket.id === currentDrawerId) socket.broadcast.emit('start', data) });
   socket.on('draw', (data) => { if(socket.id === currentDrawerId) socket.broadcast.emit('draw', data) });
   socket.on('stop', () => { if(socket.id === currentDrawerId) socket.broadcast.emit('stop') });
+  
+  // NEW: Let the drawer manually wipe the board for everyone!
+  socket.on('clear_board', () => { if(socket.id === currentDrawerId) io.emit('clear_board') });
 
   socket.on('chat_message', (text) => {
     const player = players[socket.id];
