@@ -72,7 +72,8 @@ io.on('connection', (socket) => {
     if (Object.keys(players).length >= 2 && !currentDrawerId) {
       startNextRound(); 
     } else if (currentDrawerId && players[currentDrawerId]) {
-      socket.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length });
+      // FIX: Ensure late-joiners get the 'word' so the progressive hint math works!
+      socket.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length, word: currentWord });
       socket.emit('timer_update', timeRemaining); // Give late joiners the current time
     }
   });
