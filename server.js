@@ -83,6 +83,9 @@ io.on('connection', (socket) => {
   
   // NEW: Let the drawer manually wipe the board for everyone!
   socket.on('clear_board', () => { if(socket.id === currentDrawerId) io.emit('clear_board') });
+  
+  // NEW: Sync paint bucket fills!
+  socket.on('fill', (data) => { if(socket.id === currentDrawerId) socket.broadcast.emit('fill', data) });
 
   socket.on('chat_message', (text) => {
     const player = players[socket.id];
