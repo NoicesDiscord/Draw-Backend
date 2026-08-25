@@ -75,16 +75,33 @@ io.on('connection', (socket) => {
   socket.on('chat_message', (text) => {
     const player = players[socket.id];
     if (!player) return;
-
+    
     if (currentWord && text.trim().toLowerCase() === currentWord.toLowerCase()) {
-      clearInterval(timerInterval); // Stop clock on correct guess!
+      clearInterval(timerInterval); 
       player.score += 10;
       if (players[currentDrawerId]) players[currentDrawerId].score += 5;
       
       broadcastPlayers(); 
       io.emit('chat_message', { sender: player.name, text: text, isGuess: true });
-      setTimeout(startNextRound, 3000);
-    } else {
+      
+      // NEW: Check if this player just reached 100 points
+      if (player.score >= 100) {
+        io.emit('game_over', player.name);
+        
+        // Reset all scores to 0 for the next match
+        Object.values(players).forEach(p => p.score = 0);
+        
+        // Wait 8 seconds for the celebration screen, then restart
+        setTimeout(() => {
+          broadcastPlayers();
+          startNextRound();
+        }, 8000); 
+      } else {
+        // Normal round progression
+        setTimeout(startNextRound, 3000);
+      }
+    }
+     else {
       io.emit('chat_message', { sender: player.name, text: text, isGuess: false });
     }
   });
