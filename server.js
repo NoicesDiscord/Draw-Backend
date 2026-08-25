@@ -86,6 +86,10 @@ io.on('connection', (socket) => {
   
   // NEW: Sync paint bucket fills!
   socket.on('fill', (data) => { if(socket.id === currentDrawerId) socket.broadcast.emit('fill', data) });
+  
+  // NEW: Sync Undo and Redo!
+  socket.on('undo', () => { if(socket.id === currentDrawerId) socket.broadcast.emit('undo') });
+  socket.on('redo', () => { if(socket.id === currentDrawerId) socket.broadcast.emit('redo') });
 
   socket.on('chat_message', (text) => {
     const player = players[socket.id];
