@@ -46,7 +46,7 @@ function startNextRound() {
   currentWord = wordList[Math.floor(Math.random() * wordList.length)];
   timeRemaining = 60; // Set clock to 60 seconds
 
-  io.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length });
+  io.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length, word: currentWord });
   io.emit('clear_board'); 
   io.to(currentDrawerId).emit('secret_word', currentWord);
 
