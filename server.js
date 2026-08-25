@@ -9,21 +9,24 @@ const server = http.createServer(app);
 
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
-// --- UPGRADED GAME STATE ---
-// Now stores objects: { socketId: { name: "Player", score: 0 } }
+// --- GAME STATE ---
 let players = {}; 
 let currentWord = "";
 let currentDrawerId = null;
 const wordList = ["apple", "house", "car", "dog", "sun", "pizza", "mountain", "ocean", "guitar", "robot"];
 
-// Helper to broadcast the leaderboard
 function broadcastPlayers() {
   io.emit('update_players', Object.values(players));
 }
 
 function startNextRound() {
   const playerIds = Object.keys(players);
-  if (playerIds.length === 0) return;
+  
+  // Safety check: Don't start if fewer than 2 players
+  if (playerIds.length < 2) {
+    currentDrawerId = null;
+    return;
+  }
 
   currentDrawerId = playerIds[Math.floor(Math.random() * playerIds.length)];
   currentWord = wordList[Math.floor(Math.random() * wordList.length)];
@@ -32,19 +35,28 @@ function startNextRound() {
     drawerName: players[currentDrawerId].name,
     wordLength: currentWord.length
   });
-
+  
+  // Always clear the board when a new round starts
+  io.emit('clear_board'); 
   io.to(currentDrawerId).emit('secret_word', currentWord);
 }
 
 io.on('connection', (socket) => {
   
   socket.on('join_game', (playerName) => {
-    // Initialize player with a score of 0
     players[socket.id] = { name: playerName, score: 0 };
-    broadcastPlayers(); // Tell everyone about the new player
+    broadcastPlayers(); 
 
+    // 1. If we have enough players and no one is drawing, start!
     if (Object.keys(players).length >= 2 && !currentDrawerId) {
       startNextRound(); 
+    } 
+    // 2. NEW: If a game is ALREADY running, tell the late joiner!
+    else if (currentDrawerId && players[currentDrawerId]) {
+      socket.emit('round_update', {
+        drawerName: players[currentDrawerId].name,
+        wordLength: currentWord.length
+      });
     }
   });
 
@@ -57,18 +69,14 @@ io.on('connection', (socket) => {
     if (!player) return;
 
     if (currentWord && text.trim().toLowerCase() === currentWord.toLowerCase()) {
-      // --- SCORING LOGIC ---
-      // Give 10 points to the guesser
       player.score += 10;
-      // Give 5 points to the drawer (if they exist)
       if (players[currentDrawerId]) {
         players[currentDrawerId].score += 5;
       }
       
-      broadcastPlayers(); // Update everyone's scoreboard
+      broadcastPlayers(); 
       io.emit('chat_message', { sender: player.name, text: text, isGuess: true });
       
-      io.emit('clear_board');
       setTimeout(startNextRound, 3000);
     } else {
       io.emit('chat_message', { sender: player.name, text: text, isGuess: false });
@@ -77,8 +85,19 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     delete players[socket.id];
-    broadcastPlayers(); // Update scoreboard when someone leaves
-    if (socket.id === currentDrawerId) startNextRound(); 
+    broadcastPlayers(); 
+    
+    const remainingPlayers = Object.keys(players).length;
+    
+    // NEW: The "Zombie" Fix
+    if (remainingPlayers < 2) {
+      // If room empties out, completely reset the game state
+      currentDrawerId = null;
+      currentWord = "";
+    } else if (socket.id === currentDrawerId) {
+      // If the drawer left but people are still here, skip to the next person
+      startNextRound(); 
+    }
   });
 });
 
