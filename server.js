@@ -17,7 +17,16 @@ let currentDrawerId = null;
 let timeRemaining = 0;
 let timerInterval = null; 
 
-const wordList = ["apple", "house", "car", "dog", "sun", "pizza", "mountain", "ocean", "guitar", "robot"];
+// NEW: Load words cleanly from the external CSV file
+const fs = require('fs');
+const path = require('path');
+const wordsCsvPath = path.join(__dirname, 'words.csv');
+
+const wordList = fs.readFileSync(wordsCsvPath, 'utf8')
+  .split(',') // Split by comma
+  .map(w => w.trim()) // Remove any accidental spaces
+  .filter(w => w.length > 0); // Ignore any empty entries
+  
 
 function broadcastPlayers() {
   io.emit('update_players', Object.values(players));
