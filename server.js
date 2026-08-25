@@ -103,6 +103,9 @@ io.on('connection', (socket) => {
       broadcastPlayers(); 
       io.emit('chat_message', { sender: player.name, text: text, isGuess: true });
       
+      // NEW: Tell all clients to play the "Ding!" sound!
+      io.emit('correct_guess');
+      
       // NEW: Check if this player just reached 100 points
       if (player.score >= 30) {
         io.emit('game_over', player.name);
