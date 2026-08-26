@@ -9,10 +9,9 @@ const server = http.createServer(app);
 
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
-// --- NEW: Multi-Lobby Architecture ---
-const MAX_PLAYERS = 8;
+const PUBLIC_MAX_PLAYERS = 8;
 let roomCounter = 1;
-const rooms = {}; // Stores all active lobbies
+const rooms = {}; 
 
 const fs = require('fs');
 const path = require('path');
@@ -23,29 +22,39 @@ const wordList = fs.readFileSync(wordsCsvPath, 'utf8')
   .map(w => w.trim()) 
   .filter(w => w.length > 0); 
 
-// Helper to find an open lobby or create a new one!
-function getOrCreateRoom() {
+// --- NEW: Room Generators ---
+function getOrCreatePublicRoom() {
   for (const roomId in rooms) {
-    if (Object.keys(rooms[roomId].players).length < MAX_PLAYERS) {
+    if (!rooms[roomId].isPrivate && Object.keys(rooms[roomId].players).length < PUBLIC_MAX_PLAYERS) {
       return roomId;
     }
   }
-  const newRoomId = `lobby_${roomCounter++}`;
-  rooms[newRoomId] = {
-    id: newRoomId,
-    players: {},
-    currentWord: "",
-    currentDrawerId: null,
-    gameState: 'waiting', // waiting, choosing, drawing
-    timeRemaining: 0,
-    timerInterval: null,
-    afkTimeout: null,
-    currentRound: 1,
-    drawQueue: [],
-    priorityQueue: [],
-    activeVotes: {}
-  };
+  const newRoomId = `public_${roomCounter++}`;
+  rooms[newRoomId] = createRoomObject(newRoomId, false, null, PUBLIC_MAX_PLAYERS, 3, 120);
   return newRoomId;
+}
+
+function createPrivateRoom(hostId, settings) {
+  // Generate a random 6-character room code (e.g., "X7B9A2")
+  const newRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+  rooms[newRoomId] = createRoomObject(
+    newRoomId, 
+    true, 
+    hostId, 
+    parseInt(settings.maxPlayers) || 8, 
+    parseInt(settings.rounds) || 3, 
+    parseInt(settings.drawTime) || 120
+  );
+  return newRoomId;
+}
+
+function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime) {
+  return {
+    id, isPrivate, hostId, maxPlayers, maxRounds, drawTime,
+    players: {}, currentWord: "", currentDrawerId: null,
+    gameState: 'waiting', timeRemaining: 0, timerInterval: null,
+    afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {}
+  };
 }
 
 function broadcastPlayers(roomId) {
@@ -71,7 +80,6 @@ function getEditDistance(a, b) {
   return matrix[b.length][a.length];
 }
 
-// Phase 1 - Choosing the Word
 function startNextTurn(roomId) {
   const room = rooms[roomId];
   if (!room) return;
@@ -90,7 +98,8 @@ function startNextTurn(roomId) {
 
   if (room.drawQueue.length === 0) {
     room.currentRound++;
-    if (room.currentRound > 3) {
+    // FIX: Check against custom maxRounds!
+    if (room.currentRound > room.maxRounds) {
       room.gameState = 'waiting';
       let winnerId = playerIds.reduce((a, b) => room.players[a].score > room.players[b].score ? a : b);
       io.to(roomId).emit('game_over', room.players[winnerId].name);
@@ -99,9 +108,15 @@ function startNextTurn(roomId) {
       room.currentRound = 1;
       room.drawQueue = Object.keys(room.players); 
       room.priorityQueue = [];
+      
+      // If it's a private room, force them back to the host waiting screen after the game ends
       setTimeout(() => {
         broadcastPlayers(roomId);
-        startNextTurn(roomId);
+        if (room.isPrivate) {
+          io.to(roomId).emit('waiting_for_host');
+        } else {
+          startNextTurn(roomId);
+        }
       }, 8000); 
       return;
     } else {
@@ -143,7 +158,6 @@ function startNextTurn(roomId) {
   }, 1000);
 }
 
-// Phase 2 - Actually Drawing
 function startDrawingPhase(roomId, selectedWord) {
   const room = rooms[roomId];
   if (!room) return;
@@ -153,9 +167,10 @@ function startDrawingPhase(roomId, selectedWord) {
   
   room.gameState = 'drawing';
   room.currentWord = selectedWord;
-  room.timeRemaining = 120; 
+  // FIX: Use the custom draw time!
+  room.timeRemaining = room.drawTime; 
 
-  io.to(roomId).emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound });
+  io.to(roomId).emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound, maxRounds: room.maxRounds });
   io.to(room.currentDrawerId).emit('secret_word', room.currentWord);
 
   room.timerInterval = setInterval(() => {
@@ -177,37 +192,92 @@ function startDrawingPhase(roomId, selectedWord) {
   }, 40000); 
 }
 
-
 io.on('connection', (socket) => {
-  socket.on('join_game', (playerName) => {
-    // 1. Find a lobby and join it
-    const roomId = getOrCreateRoom();
-    socket.join(roomId);
-    socket.roomId = roomId; // Remember which room this socket belongs to!
+  socket.on('join_game', (data) => {
+    // We now expect an object: { playerName, roomId (optional), privateSettings (optional) }
+    const playerName = typeof data === 'string' ? data : data.playerName;
+    const requestedRoomId = data.roomId;
+    const privateSettings = data.privateSettings;
+
+    let roomId;
+
+    // 1. Determine Room Logic
+    if (privateSettings) {
+      // Create a brand new private room
+      roomId = createPrivateRoom(socket.id, privateSettings);
+    } else if (requestedRoomId) {
+      // Trying to join via an Invite Link
+      if (!rooms[requestedRoomId]) {
+        return socket.emit('room_error', "This room does not exist or has expired.");
+      }
+      roomId = requestedRoomId;
+    } else {
+      // Standard Public Matchmaking
+      roomId = getOrCreatePublicRoom();
+    }
+
     const room = rooms[roomId];
 
-    // 2. Add player to the room
+    if (Object.keys(room.players).length >= room.maxPlayers) {
+      return socket.emit('room_error', "This room is currently full.");
+    }
+
+    // 2. Join the Room
+    socket.join(roomId);
+    socket.roomId = roomId; 
     room.players[socket.id] = { id: socket.id, name: playerName, score: 0 };
-    broadcastPlayers(roomId); 
     
-    // Announce the join to their specific lobby
-    io.to(roomId).emit('chat_message', { sender: "System", text: `${playerName} joined the lobby. (${Object.keys(room.players).length}/${MAX_PLAYERS})`, isGuess: false });
+    // Send room metadata back to the client so they know if they are host!
+    socket.emit('room_joined', { 
+      roomId: room.id, 
+      isPrivate: room.isPrivate, 
+      isHost: room.hostId === socket.id,
+      maxRounds: room.maxRounds,
+      drawTime: room.drawTime
+    });
+
+    broadcastPlayers(roomId); 
+    io.to(roomId).emit('chat_message', { sender: "System", text: `${playerName} joined the lobby. (${Object.keys(room.players).length}/${room.maxPlayers})`, isGuess: false });
 
     // 3. Start or Sync the Game
-    if (Object.keys(room.players).length >= 2 && !room.currentDrawerId) {
+    if (!room.isPrivate) {
+      // Public Rooms Auto-Start
+      if (Object.keys(room.players).length >= 2 && !room.currentDrawerId) {
+        room.currentRound = 1;
+        room.drawQueue = Object.keys(room.players);
+        room.priorityQueue = [];
+        startNextTurn(roomId); 
+      } else if (room.currentDrawerId && room.players[room.currentDrawerId]) {
+        syncLateJoiner(socket, room);
+      }
+    } else {
+      // Private Rooms wait for Host to press Start
+      if (room.gameState === 'waiting') {
+        socket.emit('waiting_for_host');
+      } else {
+        syncLateJoiner(socket, room);
+      }
+    }
+  });
+
+  function syncLateJoiner(socket, room) {
+    room.priorityQueue.push(socket.id);
+    if (room.gameState === 'choosing') {
+      socket.emit('choosing_word', { drawerName: room.players[room.currentDrawerId].name });
+    } else if (room.gameState === 'drawing') {
+      socket.emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound, maxRounds: room.maxRounds });
+    }
+    socket.emit('timer_update', room.timeRemaining); 
+  }
+
+  // --- NEW: Host manually starting a private game ---
+  socket.on('start_private_game', () => {
+    const room = rooms[socket.roomId];
+    if (room && room.isPrivate && room.hostId === socket.id && Object.keys(room.players).length >= 2) {
       room.currentRound = 1;
       room.drawQueue = Object.keys(room.players);
       room.priorityQueue = [];
-      startNextTurn(roomId); 
-    } else if (room.currentDrawerId && room.players[room.currentDrawerId]) {
-      room.priorityQueue.push(socket.id);
-      
-      if (room.gameState === 'choosing') {
-        socket.emit('choosing_word', { drawerName: room.players[room.currentDrawerId].name });
-      } else if (room.gameState === 'drawing') {
-        socket.emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound });
-      }
-      socket.emit('timer_update', room.timeRemaining); 
+      startNextTurn(room.id);
     }
   });
 
@@ -220,7 +290,6 @@ io.on('connection', (socket) => {
 
   const cancelAfk = (room) => { if (room && socket.id === room.currentDrawerId && room.gameState === 'drawing') clearTimeout(room.afkTimeout); };
 
-  // Note: socket.to(roomId).emit sends to everyone in the room EXCEPT the sender!
   socket.on('start', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) { cancelAfk(room); socket.to(room.id).emit('start', data); } });
   socket.on('draw', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('draw', data) });
   socket.on('stop', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('stop') });
@@ -231,10 +300,15 @@ io.on('connection', (socket) => {
   socket.on('undo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('undo') });
   socket.on('redo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('redo') });
 
-  // Vote Kick Logic scoped to rooms
+  // Vote Kick Logic 
   socket.on('initiate_votekick', (targetId) => {
     const room = rooms[socket.roomId];
     if (!room) return;
+    
+    // Prevent kicking the host of a private room
+    if (room.isPrivate && room.hostId === targetId) {
+       return socket.emit('chat_message', { sender: "System", text: `You cannot vote kick the room host.`, isGuess: false });
+    }
     
     const initiator = room.players[socket.id];
     const target = room.players[targetId];
@@ -342,7 +416,16 @@ io.on('connection', (socket) => {
     room.drawQueue = room.drawQueue.filter(id => id !== socket.id);
     room.priorityQueue = room.priorityQueue.filter(id => id !== socket.id);
     
-    // If the room is completely empty, shut it down and delete it from memory!
+    // Auto-Host Reassignment: If host leaves, make someone else the host!
+    if (room.isPrivate && socket.id === room.hostId) {
+      const remainingIds = Object.keys(room.players);
+      if (remainingIds.length > 0) {
+        room.hostId = remainingIds[0];
+        // Tell the new host they are in charge now
+        io.to(room.hostId).emit('room_joined', { roomId: room.id, isPrivate: true, isHost: true, maxRounds: room.maxRounds, drawTime: room.drawTime });
+      }
+    }
+
     if (Object.keys(room.players).length === 0) {
       clearInterval(room.timerInterval);
       clearTimeout(room.afkTimeout);
@@ -358,7 +441,11 @@ io.on('connection', (socket) => {
       room.gameState = 'waiting';
       room.currentDrawerId = null;
       room.currentWord = "";
-      io.to(room.id).emit('waiting_for_players');
+      if (room.isPrivate) {
+         io.to(room.id).emit('waiting_for_host');
+      } else {
+         io.to(room.id).emit('waiting_for_players');
+      }
     } else if (socket.id === room.currentDrawerId) {
       clearInterval(room.timerInterval);
       clearTimeout(room.afkTimeout); 
