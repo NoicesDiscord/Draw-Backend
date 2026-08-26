@@ -34,6 +34,25 @@ function broadcastPlayers() {
   io.emit('update_players', Object.values(players));
 }
 
+// --- NEW: Helper function to calculate spelling typos (Levenshtein Distance) ---
+function getEditDistance(a, b) {
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) { matrix[i] = [i]; }
+  for (let j = 0; j <= a.length; j++) { matrix[0][j] = j; }
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(matrix[i - 1][j - 1] + 1, Math.min(matrix[i][j - 1] + 1, matrix[i - 1][j] + 1));
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
 // --- NEW: Fair Round-Robin Turn System ---
 function startNextTurn() {
   clearInterval(timerInterval); // Stop any old timers
@@ -163,7 +182,29 @@ io.on('connection', (socket) => {
       // Move to the next turn immediately (game over check is now handled in startNextTurn)
       setTimeout(startNextTurn, 3000);
     } else {
+      // It wasn't an exact match, broadcast the wrong guess normally
       io.emit('chat_message', { sender: player.name, text: text, isGuess: false });
+      
+      // NEW: Check if they were extremely close!
+      if (currentWord && currentWord.length > 2) {
+        const guess = text.trim().toLowerCase();
+        const target = currentWord.toLowerCase();
+        
+        // Make sure it's roughly the same size before doing the heavy math
+        if (Math.abs(guess.length - target.length) <= 2) {
+          const typos = getEditDistance(guess, target);
+          
+          // If they are only 1 letter off (or 2 letters off on a big word > 5 letters)
+          if (typos === 1 || (typos === 2 && target.length >= 5)) {
+            // Secretly whisper back to ONLY the player who guessed it!
+            socket.emit('chat_message', { 
+              sender: "System", 
+              text: `'${text}' is very close! Keep trying!`, 
+              isGuess: false 
+            });
+          }
+        }
+      }
     }
   });
 
