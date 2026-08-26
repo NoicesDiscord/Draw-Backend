@@ -271,6 +271,9 @@ io.on('connection', (socket) => {
       socket.emit('choosing_word', { drawerName: room.players[room.currentDrawerId].name });
     } else if (room.gameState === 'drawing') {
       socket.emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound, maxRounds: room.maxRounds });
+      
+      // FIX: Ask the current drawer to take a screenshot and send it to this specific late joiner!
+      io.to(room.currentDrawerId).emit('request_canvas_state', socket.id);
     }
     socket.emit('timer_update', room.timeRemaining); 
   }
@@ -304,7 +307,10 @@ io.on('connection', (socket) => {
   
   socket.on('undo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('undo') });
   socket.on('redo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('redo') });
-
+  // NEW: Catch the snapshot from the drawer and hand it directly to the late joiner!
+  socket.on('send_canvas_state', ({ targetId, canvasData }) => {
+    io.to(targetId).emit('load_canvas_state', canvasData);
+  });
   // Vote Kick Logic 
   socket.on('initiate_votekick', (targetId) => {
     const room = rooms[socket.roomId];
