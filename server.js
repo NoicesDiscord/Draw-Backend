@@ -93,7 +93,7 @@ function startNextTurn() {
   }
 
   currentWord = wordList[Math.floor(Math.random() * wordList.length)];
-  timeRemaining = 60; 
+  timeRemaining = 120; // FIX: Increased to 120 seconds for public lobbies 
 
   io.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length, word: currentWord, currentRound });
   io.emit('clear_board'); 
@@ -116,7 +116,7 @@ function startNextTurn() {
     clearInterval(timerInterval); // Stop the main round clock
     io.emit('chat_message', { sender: "System", text: `Drawer is AFK! Skipping turn...`, isGuess: false });
     startNextTurn(); 
-  }, 15000);
+  }, 30000); // FIX: Increased AFK penalty to 30 seconds
 }
 
 io.on('connection', (socket) => {
