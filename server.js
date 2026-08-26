@@ -9,19 +9,10 @@ const server = http.createServer(app);
 
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
-let players = {}; 
-let currentWord = "";
-let currentDrawerId = null;
-
-// --- Timers and States ---
-let gameState = 'waiting'; // NEW: Tracks if we are 'waiting', 'choosing', or 'drawing'
-let timeRemaining = 0;
-let timerInterval = null; 
-let afkTimeout = null; 
-let currentRound = 1;
-let drawQueue = [];      
-let priorityQueue = [];  
-let activeVotes = {}; 
+// --- NEW: Multi-Lobby Architecture ---
+const MAX_PLAYERS = 8;
+let roomCounter = 1;
+const rooms = {}; // Stores all active lobbies
 
 const fs = require('fs');
 const path = require('path');
@@ -32,8 +23,34 @@ const wordList = fs.readFileSync(wordsCsvPath, 'utf8')
   .map(w => w.trim()) 
   .filter(w => w.length > 0); 
 
-function broadcastPlayers() {
-  io.emit('update_players', Object.values(players));
+// Helper to find an open lobby or create a new one!
+function getOrCreateRoom() {
+  for (const roomId in rooms) {
+    if (Object.keys(rooms[roomId].players).length < MAX_PLAYERS) {
+      return roomId;
+    }
+  }
+  const newRoomId = `lobby_${roomCounter++}`;
+  rooms[newRoomId] = {
+    id: newRoomId,
+    players: {},
+    currentWord: "",
+    currentDrawerId: null,
+    gameState: 'waiting', // waiting, choosing, drawing
+    timeRemaining: 0,
+    timerInterval: null,
+    afkTimeout: null,
+    currentRound: 1,
+    drawQueue: [],
+    priorityQueue: [],
+    activeVotes: {}
+  };
+  return newRoomId;
+}
+
+function broadcastPlayers(roomId) {
+  const room = rooms[roomId];
+  if (room) io.to(roomId).emit('update_players', Object.values(room.players));
 }
 
 function getEditDistance(a, b) {
@@ -54,53 +71,56 @@ function getEditDistance(a, b) {
   return matrix[b.length][a.length];
 }
 
-// --- NEW: Phase 1 - Choosing the Word ---
-function startNextTurn() {
-  clearInterval(timerInterval); 
-  clearTimeout(afkTimeout); 
+// Phase 1 - Choosing the Word
+function startNextTurn(roomId) {
+  const room = rooms[roomId];
+  if (!room) return;
+
+  clearInterval(room.timerInterval); 
+  clearTimeout(room.afkTimeout); 
   
-  const playerIds = Object.keys(players);
+  const playerIds = Object.keys(room.players);
   if (playerIds.length < 2) {
-    gameState = 'waiting';
-    currentDrawerId = null;
-    currentWord = "";
-    io.emit('waiting_for_players');
+    room.gameState = 'waiting';
+    room.currentDrawerId = null;
+    room.currentWord = "";
+    io.to(roomId).emit('waiting_for_players');
     return;
   }
 
-  if (drawQueue.length === 0) {
-    currentRound++;
-    if (currentRound > 3) {
-      gameState = 'waiting';
-      let winnerId = playerIds.reduce((a, b) => players[a].score > players[b].score ? a : b);
-      io.emit('game_over', players[winnerId].name);
-      Object.values(players).forEach(p => p.score = 0);
-      currentRound = 1;
-      drawQueue = Object.keys(players); 
-      priorityQueue = [];
+  if (room.drawQueue.length === 0) {
+    room.currentRound++;
+    if (room.currentRound > 3) {
+      room.gameState = 'waiting';
+      let winnerId = playerIds.reduce((a, b) => room.players[a].score > room.players[b].score ? a : b);
+      io.to(roomId).emit('game_over', room.players[winnerId].name);
+      
+      Object.values(room.players).forEach(p => p.score = 0);
+      room.currentRound = 1;
+      room.drawQueue = Object.keys(room.players); 
+      room.priorityQueue = [];
       setTimeout(() => {
-        broadcastPlayers();
-        startNextTurn();
+        broadcastPlayers(roomId);
+        startNextTurn(roomId);
       }, 8000); 
       return;
     } else {
-      drawQueue = [...priorityQueue];
-      priorityQueue = [];
+      room.drawQueue = [...room.priorityQueue];
+      room.priorityQueue = [];
       playerIds.forEach(id => {
-        if (!drawQueue.includes(id)) drawQueue.push(id);
+        if (!room.drawQueue.includes(id)) room.drawQueue.push(id);
       });
     }
   }
 
-  currentDrawerId = drawQueue.shift();
-  if (!players[currentDrawerId]) {
-    return startNextTurn(); 
+  room.currentDrawerId = room.drawQueue.shift();
+  if (!room.players[room.currentDrawerId]) {
+    return startNextTurn(roomId); 
   }
 
-  gameState = 'choosing';
-  timeRemaining = 15; 
+  room.gameState = 'choosing';
+  room.timeRemaining = 15; 
   
-  // Pick 5 random words from the database
   let choices = [];
   let tempWords = [...wordList];
   for (let i = 0; i < 5; i++) {
@@ -109,109 +129,125 @@ function startNextTurn() {
     choices.push(tempWords.splice(randIndex, 1)[0]);
   }
 
-  io.emit('clear_board');
-  io.emit('choosing_word', { drawerName: players[currentDrawerId].name });
-  io.to(currentDrawerId).emit('your_word_choices', choices);
+  io.to(roomId).emit('clear_board');
+  io.to(roomId).emit('choosing_word', { drawerName: room.players[room.currentDrawerId].name });
+  io.to(room.currentDrawerId).emit('your_word_choices', choices);
 
-  timerInterval = setInterval(() => {
-    timeRemaining--;
-    io.emit('timer_update', timeRemaining); 
+  room.timerInterval = setInterval(() => {
+    room.timeRemaining--;
+    io.to(roomId).emit('timer_update', room.timeRemaining); 
 
-    // If they don't pick in 15 seconds, auto-pick the first word for them!
-    if (timeRemaining <= 0) {
-      startDrawingPhase(choices[0]);
+    if (room.timeRemaining <= 0) {
+      startDrawingPhase(roomId, choices[0]);
     }
   }, 1000);
 }
 
-// --- NEW: Phase 2 - Actually Drawing ---
-function startDrawingPhase(selectedWord) {
-  clearInterval(timerInterval);
-  clearTimeout(afkTimeout);
+// Phase 2 - Actually Drawing
+function startDrawingPhase(roomId, selectedWord) {
+  const room = rooms[roomId];
+  if (!room) return;
+
+  clearInterval(room.timerInterval);
+  clearTimeout(room.afkTimeout);
   
-  gameState = 'drawing';
-  currentWord = selectedWord;
-  timeRemaining = 120; 
+  room.gameState = 'drawing';
+  room.currentWord = selectedWord;
+  room.timeRemaining = 120; 
 
-  io.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length, word: currentWord, currentRound });
-  io.to(currentDrawerId).emit('secret_word', currentWord);
+  io.to(roomId).emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound });
+  io.to(room.currentDrawerId).emit('secret_word', room.currentWord);
 
-  timerInterval = setInterval(() => {
-    timeRemaining--;
-    io.emit('timer_update', timeRemaining); 
+  room.timerInterval = setInterval(() => {
+    room.timeRemaining--;
+    io.to(roomId).emit('timer_update', room.timeRemaining); 
 
-    if (timeRemaining <= 0) {
-      clearInterval(timerInterval);
-      clearTimeout(afkTimeout); 
-      io.emit('chat_message', { sender: "System", text: `Time's up! The word was: ${currentWord}`, isGuess: false });
-      setTimeout(startNextTurn, 3000); 
+    if (room.timeRemaining <= 0) {
+      clearInterval(room.timerInterval);
+      clearTimeout(room.afkTimeout); 
+      io.to(roomId).emit('chat_message', { sender: "System", text: `Time's up! The word was: ${room.currentWord}`, isGuess: false });
+      setTimeout(() => startNextTurn(roomId), 3000); 
     }
   }, 1000);
 
-  afkTimeout = setTimeout(() => {
-    clearInterval(timerInterval); 
-    io.emit('chat_message', { sender: "System", text: `Drawer is AFK! Skipping turn...`, isGuess: false });
-    startNextTurn(); 
+  room.afkTimeout = setTimeout(() => {
+    clearInterval(room.timerInterval); 
+    io.to(roomId).emit('chat_message', { sender: "System", text: `Drawer is AFK! Skipping turn...`, isGuess: false });
+    startNextTurn(roomId); 
   }, 40000); 
 }
 
 
 io.on('connection', (socket) => {
   socket.on('join_game', (playerName) => {
-    players[socket.id] = { id: socket.id, name: playerName, score: 0 };
-    broadcastPlayers(); 
+    // 1. Find a lobby and join it
+    const roomId = getOrCreateRoom();
+    socket.join(roomId);
+    socket.roomId = roomId; // Remember which room this socket belongs to!
+    const room = rooms[roomId];
 
-    if (Object.keys(players).length >= 2 && !currentDrawerId) {
-      currentRound = 1;
-      drawQueue = Object.keys(players);
-      priorityQueue = [];
-      startNextTurn(); 
-    } else if (currentDrawerId && players[currentDrawerId]) {
-      priorityQueue.push(socket.id);
+    // 2. Add player to the room
+    room.players[socket.id] = { id: socket.id, name: playerName, score: 0 };
+    broadcastPlayers(roomId); 
+    
+    // Announce the join to their specific lobby
+    io.to(roomId).emit('chat_message', { sender: "System", text: `${playerName} joined the lobby. (${Object.keys(room.players).length}/${MAX_PLAYERS})`, isGuess: false });
+
+    // 3. Start or Sync the Game
+    if (Object.keys(room.players).length >= 2 && !room.currentDrawerId) {
+      room.currentRound = 1;
+      room.drawQueue = Object.keys(room.players);
+      room.priorityQueue = [];
+      startNextTurn(roomId); 
+    } else if (room.currentDrawerId && room.players[room.currentDrawerId]) {
+      room.priorityQueue.push(socket.id);
       
-      // FIX: Tell the late joiner exactly what phase the game is currently in!
-      if (gameState === 'choosing') {
-        socket.emit('choosing_word', { drawerName: players[currentDrawerId].name });
-      } else if (gameState === 'drawing') {
-        socket.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length, word: currentWord, currentRound });
+      if (room.gameState === 'choosing') {
+        socket.emit('choosing_word', { drawerName: room.players[room.currentDrawerId].name });
+      } else if (room.gameState === 'drawing') {
+        socket.emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound });
       }
-      socket.emit('timer_update', timeRemaining); 
+      socket.emit('timer_update', room.timeRemaining); 
     }
   });
 
-  // NEW: Catch the drawer's choice and start the round!
   socket.on('word_chosen', (word) => {
-    if (socket.id === currentDrawerId && gameState === 'choosing') {
-      startDrawingPhase(word);
+    const room = rooms[socket.roomId];
+    if (room && socket.id === room.currentDrawerId && room.gameState === 'choosing') {
+      startDrawingPhase(room.id, word);
     }
   });
 
-  const cancelAfk = () => { if (socket.id === currentDrawerId && gameState === 'drawing') clearTimeout(afkTimeout); };
+  const cancelAfk = (room) => { if (room && socket.id === room.currentDrawerId && room.gameState === 'drawing') clearTimeout(room.afkTimeout); };
 
-  socket.on('start', (data) => { if(socket.id === currentDrawerId) { cancelAfk(); socket.broadcast.emit('start', data); } });
-  socket.on('draw', (data) => { if(socket.id === currentDrawerId) socket.broadcast.emit('draw', data) });
-  socket.on('stop', () => { if(socket.id === currentDrawerId) socket.broadcast.emit('stop') });
+  // Note: socket.to(roomId).emit sends to everyone in the room EXCEPT the sender!
+  socket.on('start', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) { cancelAfk(room); socket.to(room.id).emit('start', data); } });
+  socket.on('draw', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('draw', data) });
+  socket.on('stop', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('stop') });
   
-  socket.on('clear_board', () => { if(socket.id === currentDrawerId) { cancelAfk(); io.emit('clear_board'); } });
-  socket.on('fill', (data) => { if(socket.id === currentDrawerId) { cancelAfk(); socket.broadcast.emit('fill', data); } });
+  socket.on('clear_board', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) { cancelAfk(room); io.to(room.id).emit('clear_board'); } });
+  socket.on('fill', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) { cancelAfk(room); socket.to(room.id).emit('fill', data); } });
   
-  socket.on('undo', () => { if(socket.id === currentDrawerId) socket.broadcast.emit('undo') });
-  socket.on('redo', () => { if(socket.id === currentDrawerId) socket.broadcast.emit('redo') });
+  socket.on('undo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('undo') });
+  socket.on('redo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('redo') });
 
-  // Vote Kick Logic
+  // Vote Kick Logic scoped to rooms
   socket.on('initiate_votekick', (targetId) => {
-    const initiator = players[socket.id];
-    const target = players[targetId];
-    if (!initiator || !target || activeVotes[targetId]) return;
+    const room = rooms[socket.roomId];
+    if (!room) return;
+    
+    const initiator = room.players[socket.id];
+    const target = room.players[targetId];
+    if (!initiator || !target || room.activeVotes[targetId]) return;
 
-    activeVotes[targetId] = {
+    room.activeVotes[targetId] = {
       yes: new Set([socket.id]), 
       no: new Set(),
       targetName: target.name,
       initiatorName: initiator.name
     };
 
-    io.emit('chat_message', {
+    io.to(room.id).emit('chat_message', {
       type: 'votekick',
       targetId: targetId,
       targetName: target.name,
@@ -220,62 +256,68 @@ io.on('connection', (socket) => {
     });
 
     setTimeout(() => {
-      if (activeVotes[targetId]) {
-        io.emit('chat_message', { sender: "System", text: `Vote to kick ${target.name} expired.`, isGuess: false });
-        delete activeVotes[targetId];
+      if (room.activeVotes && room.activeVotes[targetId]) {
+        io.to(room.id).emit('chat_message', { sender: "System", text: `Vote to kick ${target.name} expired.`, isGuess: false });
+        delete room.activeVotes[targetId];
       }
     }, 60000);
   });
 
   socket.on('submit_votekick', (data) => {
+    const room = rooms[socket.roomId];
+    if (!room) return;
+    
     const { targetId, vote } = data; 
-    const voteSession = activeVotes[targetId];
-    if (!voteSession || !players[socket.id]) return;
+    const voteSession = room.activeVotes[targetId];
+    if (!voteSession || !room.players[socket.id]) return;
 
     if (vote === 'yes') voteSession.yes.add(socket.id);
     else voteSession.no.add(socket.id);
 
-    const totalPlayers = Object.keys(players).length;
+    const totalPlayers = Object.keys(room.players).length;
     const requiredVotes = Math.floor(totalPlayers / 2) + 1; 
 
     if (voteSession.yes.size >= requiredVotes) {
-      io.emit('chat_message', { sender: "System", text: `${voteSession.targetName} was kicked from the lobby.`, isGuess: false });
+      io.to(room.id).emit('chat_message', { sender: "System", text: `${voteSession.targetName} was kicked from the lobby.`, isGuess: false });
       
       const targetSocket = io.sockets.sockets.get(targetId);
       if (targetSocket) {
         targetSocket.emit('kicked_from_server');
         targetSocket.disconnect(true);
       }
-      delete activeVotes[targetId];
+      delete room.activeVotes[targetId];
     } else if (voteSession.no.size >= requiredVotes || (voteSession.yes.size + voteSession.no.size === totalPlayers)) {
-      io.emit('chat_message', { sender: "System", text: `Vote to kick ${voteSession.targetName} failed.`, isGuess: false });
-      delete activeVotes[targetId];
+      io.to(room.id).emit('chat_message', { sender: "System", text: `Vote to kick ${voteSession.targetName} failed.`, isGuess: false });
+      delete room.activeVotes[targetId];
     }
   });
 
   socket.on('chat_message', (text) => {
-    const player = players[socket.id];
-    if (!player) return;
-    if (socket.id === currentDrawerId) return;
+    const room = rooms[socket.roomId];
+    if (!room) return;
     
-    if (gameState === 'drawing' && currentWord && text.trim().toLowerCase() === currentWord.toLowerCase()) {
-      clearInterval(timerInterval); 
-      clearTimeout(afkTimeout); 
+    const player = room.players[socket.id];
+    if (!player) return;
+    if (socket.id === room.currentDrawerId) return;
+    
+    if (room.gameState === 'drawing' && room.currentWord && text.trim().toLowerCase() === room.currentWord.toLowerCase()) {
+      clearInterval(room.timerInterval); 
+      clearTimeout(room.afkTimeout); 
       
       player.score += 10;
-      if (players[currentDrawerId]) players[currentDrawerId].score += 5;
+      if (room.players[room.currentDrawerId]) room.players[room.currentDrawerId].score += 5;
       
-      broadcastPlayers(); 
-      io.emit('chat_message', { sender: player.name, text: text, isGuess: true });
-      io.emit('correct_guess');
+      broadcastPlayers(room.id); 
+      io.to(room.id).emit('chat_message', { sender: player.name, text: text, isGuess: true });
+      io.to(room.id).emit('correct_guess');
       
-      setTimeout(startNextTurn, 3000);
+      setTimeout(() => startNextTurn(room.id), 3000);
     } else {
-      io.emit('chat_message', { sender: player.name, text: text, isGuess: false });
+      io.to(room.id).emit('chat_message', { sender: player.name, text: text, isGuess: false });
       
-      if (gameState === 'drawing' && currentWord && currentWord.length > 2) {
+      if (room.gameState === 'drawing' && room.currentWord && room.currentWord.length > 2) {
         const guess = text.trim().toLowerCase();
-        const target = currentWord.toLowerCase();
+        const target = room.currentWord.toLowerCase();
         
         if (Math.abs(guess.length - target.length) <= 2) {
           const typos = getEditDistance(guess, target);
@@ -293,23 +335,34 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    delete players[socket.id];
-    drawQueue = drawQueue.filter(id => id !== socket.id);
-    priorityQueue = priorityQueue.filter(id => id !== socket.id);
+    const room = rooms[socket.roomId];
+    if (!room) return;
+
+    delete room.players[socket.id];
+    room.drawQueue = room.drawQueue.filter(id => id !== socket.id);
+    room.priorityQueue = room.priorityQueue.filter(id => id !== socket.id);
     
-    broadcastPlayers(); 
+    // If the room is completely empty, shut it down and delete it from memory!
+    if (Object.keys(room.players).length === 0) {
+      clearInterval(room.timerInterval);
+      clearTimeout(room.afkTimeout);
+      delete rooms[socket.roomId];
+      return;
+    }
+
+    broadcastPlayers(room.id); 
     
-    if (Object.keys(players).length < 2) {
-      clearInterval(timerInterval);
-      clearTimeout(afkTimeout); 
-      gameState = 'waiting';
-      currentDrawerId = null;
-      currentWord = "";
-      io.emit('waiting_for_players');
-    } else if (socket.id === currentDrawerId) {
-      clearInterval(timerInterval);
-      clearTimeout(afkTimeout); 
-      startNextTurn(); 
+    if (Object.keys(room.players).length < 2) {
+      clearInterval(room.timerInterval);
+      clearTimeout(room.afkTimeout); 
+      room.gameState = 'waiting';
+      room.currentDrawerId = null;
+      room.currentWord = "";
+      io.to(room.id).emit('waiting_for_players');
+    } else if (socket.id === room.currentDrawerId) {
+      clearInterval(room.timerInterval);
+      clearTimeout(room.afkTimeout); 
+      startNextTurn(room.id); 
     }
   });
 });
