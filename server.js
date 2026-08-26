@@ -251,6 +251,8 @@ io.on('connection', (socket) => {
       clearTimeout(afkTimeout); 
       currentDrawerId = null;
       currentWord = "";
+      // FIX: Tell the remaining player to go back to the waiting screen!
+      io.emit('waiting_for_players');
     } else if (socket.id === currentDrawerId) {
       clearInterval(timerInterval);
       clearTimeout(afkTimeout); 
