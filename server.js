@@ -14,13 +14,14 @@ let currentWord = "";
 let currentDrawerId = null;
 
 // --- Timers and States ---
+let gameState = 'waiting'; // NEW: Tracks if we are 'waiting', 'choosing', or 'drawing'
 let timeRemaining = 0;
 let timerInterval = null; 
 let afkTimeout = null; 
 let currentRound = 1;
 let drawQueue = [];      
 let priorityQueue = [];  
-let activeVotes = {}; // NEW: Tracks active kick votes
+let activeVotes = {}; 
 
 const fs = require('fs');
 const path = require('path');
@@ -53,20 +54,24 @@ function getEditDistance(a, b) {
   return matrix[b.length][a.length];
 }
 
+// --- NEW: Phase 1 - Choosing the Word ---
 function startNextTurn() {
   clearInterval(timerInterval); 
   clearTimeout(afkTimeout); 
   
   const playerIds = Object.keys(players);
   if (playerIds.length < 2) {
+    gameState = 'waiting';
     currentDrawerId = null;
     currentWord = "";
+    io.emit('waiting_for_players');
     return;
   }
 
   if (drawQueue.length === 0) {
     currentRound++;
     if (currentRound > 3) {
+      gameState = 'waiting';
       let winnerId = playerIds.reduce((a, b) => players[a].score > players[b].score ? a : b);
       io.emit('game_over', players[winnerId].name);
       Object.values(players).forEach(p => p.score = 0);
@@ -92,11 +97,43 @@ function startNextTurn() {
     return startNextTurn(); 
   }
 
-  currentWord = wordList[Math.floor(Math.random() * wordList.length)];
+  gameState = 'choosing';
+  timeRemaining = 15; 
+  
+  // Pick 5 random words from the database
+  let choices = [];
+  let tempWords = [...wordList];
+  for (let i = 0; i < 5; i++) {
+    if (tempWords.length === 0) break;
+    const randIndex = Math.floor(Math.random() * tempWords.length);
+    choices.push(tempWords.splice(randIndex, 1)[0]);
+  }
+
+  io.emit('clear_board');
+  io.emit('choosing_word', { drawerName: players[currentDrawerId].name });
+  io.to(currentDrawerId).emit('your_word_choices', choices);
+
+  timerInterval = setInterval(() => {
+    timeRemaining--;
+    io.emit('timer_update', timeRemaining); 
+
+    // If they don't pick in 15 seconds, auto-pick the first word for them!
+    if (timeRemaining <= 0) {
+      startDrawingPhase(choices[0]);
+    }
+  }, 1000);
+}
+
+// --- NEW: Phase 2 - Actually Drawing ---
+function startDrawingPhase(selectedWord) {
+  clearInterval(timerInterval);
+  clearTimeout(afkTimeout);
+  
+  gameState = 'drawing';
+  currentWord = selectedWord;
   timeRemaining = 120; 
 
   io.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length, word: currentWord, currentRound });
-  io.emit('clear_board'); 
   io.to(currentDrawerId).emit('secret_word', currentWord);
 
   timerInterval = setInterval(() => {
@@ -111,7 +148,6 @@ function startNextTurn() {
     }
   }, 1000);
 
-  // FIX: Increased AFK Penalty to 40 seconds!
   afkTimeout = setTimeout(() => {
     clearInterval(timerInterval); 
     io.emit('chat_message', { sender: "System", text: `Drawer is AFK! Skipping turn...`, isGuess: false });
@@ -119,9 +155,9 @@ function startNextTurn() {
   }, 40000); 
 }
 
+
 io.on('connection', (socket) => {
   socket.on('join_game', (playerName) => {
-    // FIX: Attach the socket.id to the player object so we can target them for kicks!
     players[socket.id] = { id: socket.id, name: playerName, score: 0 };
     broadcastPlayers(); 
 
@@ -132,12 +168,25 @@ io.on('connection', (socket) => {
       startNextTurn(); 
     } else if (currentDrawerId && players[currentDrawerId]) {
       priorityQueue.push(socket.id);
-      socket.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length, word: currentWord, currentRound });
+      
+      // FIX: Tell the late joiner exactly what phase the game is currently in!
+      if (gameState === 'choosing') {
+        socket.emit('choosing_word', { drawerName: players[currentDrawerId].name });
+      } else if (gameState === 'drawing') {
+        socket.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length, word: currentWord, currentRound });
+      }
       socket.emit('timer_update', timeRemaining); 
     }
   });
 
-  const cancelAfk = () => { if (socket.id === currentDrawerId) clearTimeout(afkTimeout); };
+  // NEW: Catch the drawer's choice and start the round!
+  socket.on('word_chosen', (word) => {
+    if (socket.id === currentDrawerId && gameState === 'choosing') {
+      startDrawingPhase(word);
+    }
+  });
+
+  const cancelAfk = () => { if (socket.id === currentDrawerId && gameState === 'drawing') clearTimeout(afkTimeout); };
 
   socket.on('start', (data) => { if(socket.id === currentDrawerId) { cancelAfk(); socket.broadcast.emit('start', data); } });
   socket.on('draw', (data) => { if(socket.id === currentDrawerId) socket.broadcast.emit('draw', data) });
@@ -149,14 +198,14 @@ io.on('connection', (socket) => {
   socket.on('undo', () => { if(socket.id === currentDrawerId) socket.broadcast.emit('undo') });
   socket.on('redo', () => { if(socket.id === currentDrawerId) socket.broadcast.emit('redo') });
 
-  // --- NEW: Vote Kick Logic ---
+  // Vote Kick Logic
   socket.on('initiate_votekick', (targetId) => {
     const initiator = players[socket.id];
     const target = players[targetId];
     if (!initiator || !target || activeVotes[targetId]) return;
 
     activeVotes[targetId] = {
-      yes: new Set([socket.id]), // The person starting the vote automatically votes YES
+      yes: new Set([socket.id]), 
       no: new Set(),
       targetName: target.name,
       initiatorName: initiator.name
@@ -170,7 +219,6 @@ io.on('connection', (socket) => {
       text: `${initiator.name} has voted to kick ${target.name}. Do you wish to kick this player from the lobby?`
     });
 
-    // Votes expire after 60 seconds if inconclusive
     setTimeout(() => {
       if (activeVotes[targetId]) {
         io.emit('chat_message', { sender: "System", text: `Vote to kick ${target.name} expired.`, isGuess: false });
@@ -188,7 +236,7 @@ io.on('connection', (socket) => {
     else voteSession.no.add(socket.id);
 
     const totalPlayers = Object.keys(players).length;
-    const requiredVotes = Math.floor(totalPlayers / 2) + 1; // Strict majority (> 50%)
+    const requiredVotes = Math.floor(totalPlayers / 2) + 1; 
 
     if (voteSession.yes.size >= requiredVotes) {
       io.emit('chat_message', { sender: "System", text: `${voteSession.targetName} was kicked from the lobby.`, isGuess: false });
@@ -210,7 +258,7 @@ io.on('connection', (socket) => {
     if (!player) return;
     if (socket.id === currentDrawerId) return;
     
-    if (currentWord && text.trim().toLowerCase() === currentWord.toLowerCase()) {
+    if (gameState === 'drawing' && currentWord && text.trim().toLowerCase() === currentWord.toLowerCase()) {
       clearInterval(timerInterval); 
       clearTimeout(afkTimeout); 
       
@@ -225,14 +273,13 @@ io.on('connection', (socket) => {
     } else {
       io.emit('chat_message', { sender: player.name, text: text, isGuess: false });
       
-      if (currentWord && currentWord.length > 2) {
+      if (gameState === 'drawing' && currentWord && currentWord.length > 2) {
         const guess = text.trim().toLowerCase();
         const target = currentWord.toLowerCase();
         
         if (Math.abs(guess.length - target.length) <= 2) {
           const typos = getEditDistance(guess, target);
           if (typos === 1 || (typos === 2 && target.length >= 5)) {
-            // FIX: Added the bulb emoji and a custom 'isCloseGuess' flag!
             socket.emit('chat_message', { 
               sender: "System", 
               text: `'${text}' is very close! Keep trying! 💡`, 
@@ -255,9 +302,9 @@ io.on('connection', (socket) => {
     if (Object.keys(players).length < 2) {
       clearInterval(timerInterval);
       clearTimeout(afkTimeout); 
+      gameState = 'waiting';
       currentDrawerId = null;
       currentWord = "";
-      // FIX: Tell the remaining player to go back to the waiting screen!
       io.emit('waiting_for_players');
     } else if (socket.id === currentDrawerId) {
       clearInterval(timerInterval);
