@@ -192,7 +192,7 @@ function startDrawingPhase(roomId, selectedWord) {
     clearInterval(room.timerInterval); 
     io.to(roomId).emit('chat_message', { sender: "System", text: `Drawer is AFK! Skipping turn...`, isGuess: false });
     startNextTurn(roomId); 
-  }, 40000); 
+  }, 60000);  // 10 sec = 10000 , 1 sec = 1000 
 }
 
 io.on('connection', (socket) => {
