@@ -442,8 +442,8 @@ io.on('connection', (socket) => {
       }
     }
   });
-
-  socket.on('disconnect', () => {
+  
+socket.on('disconnect', () => {
     const room = rooms[socket.roomId];
     if (!room) return;
 
@@ -453,7 +453,13 @@ io.on('connection', (socket) => {
     delete room.players[socket.id];
     room.drawQueue = room.drawQueue.filter(id => id !== socket.id);
     room.priorityQueue = room.priorityQueue.filter(id => id !== socket.id);
+
+    // NEW: Remove them from the winners list if they had already guessed the word!
+    if (room.correctGuessers) {
+      room.correctGuessers = room.correctGuessers.filter(id => id !== socket.id);
+    }
     
+    // EXISTING: Host Migration
     if (room.isPrivate && socket.id === room.hostId) {
       const remainingIds = Object.keys(room.players);
       if (remainingIds.length > 0) {
@@ -463,7 +469,10 @@ io.on('connection', (socket) => {
       }
     }
 
-    if (Object.keys(room.players).length === 0) {
+    const remainingPlayers = Object.keys(room.players).length;
+
+    // EXISTING: Empty Room Cleanup
+    if (remainingPlayers === 0) {
       clearInterval(room.timerInterval);
       clearTimeout(room.afkTimeout);
       delete rooms[socket.roomId];
@@ -472,9 +481,10 @@ io.on('connection', (socket) => {
 
     broadcastPlayers(room.id); 
     // NEW: Announce the departure to the lobby so the frontend can play the leave sound!
-    io.to(room.id).emit('chat_message', { sender: "System", text: `${leavingPlayerName} left the lobby. (${Object.keys(room.players).length}/${room.maxPlayers})`, isGuess: false });
+    io.to(room.id).emit('chat_message', { sender: "System", text: `${leavingPlayerName} left the lobby. (${remainingPlayers}/${room.maxPlayers})`, isGuess: false });
     
-    if (Object.keys(room.players).length < 2) {
+    // EXISTING: Less than 2 players left
+    if (remainingPlayers < 2) {
       clearInterval(room.timerInterval);
       clearTimeout(room.afkTimeout); 
       room.gameState = 'waiting';
@@ -485,10 +495,25 @@ io.on('connection', (socket) => {
       } else {
          io.to(room.id).emit('waiting_for_players');
       }
-    } else if (socket.id === room.currentDrawerId) {
-      clearInterval(room.timerInterval);
-      clearTimeout(room.afkTimeout); 
-      startNextTurn(room.id); 
+    } 
+    // NEW & UPDATED: Catch edge cases if a player leaves during a drawing phase!
+    else if (room.gameState === 'drawing') {
+      const totalGuessers = remainingPlayers - 1;
+
+      // Scenario A: The Drawer left
+      if (socket.id === room.currentDrawerId) {
+        clearInterval(room.timerInterval);
+        clearTimeout(room.afkTimeout); 
+        io.to(room.id).emit('chat_message', { sender: "System", text: `The drawer left! The word was: ${room.currentWord}`, isGuess: false });
+        setTimeout(() => startNextTurn(room.id), 3000);
+      } 
+      // Scenario B: The last clueless guesser left (Meaning everyone else left in the room already guessed it!)
+      else if (room.correctGuessers.length >= totalGuessers) {
+        clearInterval(room.timerInterval);
+        clearTimeout(room.afkTimeout); 
+        io.to(room.id).emit('chat_message', { sender: "System", text: `Everyone guessed the word! The word was: ${room.currentWord}`, isGuess: false });
+        setTimeout(() => startNextTurn(room.id), 3000);
+      }
     }
   });
 });
