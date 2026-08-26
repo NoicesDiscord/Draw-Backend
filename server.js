@@ -410,6 +410,9 @@ io.on('connection', (socket) => {
     const room = rooms[socket.roomId];
     if (!room) return;
 
+    // FIX: Grab the player's name before deleting them so we can announce they left!
+    const leavingPlayerName = room.players[socket.id] ? room.players[socket.id].name : "A player";
+
     delete room.players[socket.id];
     room.drawQueue = room.drawQueue.filter(id => id !== socket.id);
     room.priorityQueue = room.priorityQueue.filter(id => id !== socket.id);
@@ -431,6 +434,8 @@ io.on('connection', (socket) => {
     }
 
     broadcastPlayers(room.id); 
+    // NEW: Announce the departure to the lobby so the frontend can play the leave sound!
+    io.to(room.id).emit('chat_message', { sender: "System", text: `${leavingPlayerName} left the lobby. (${Object.keys(room.players).length}/${room.maxPlayers})`, isGuess: false });
     
     if (Object.keys(room.players).length < 2) {
       clearInterval(room.timerInterval);
