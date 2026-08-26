@@ -232,7 +232,13 @@ io.on('connection', (socket) => {
         if (Math.abs(guess.length - target.length) <= 2) {
           const typos = getEditDistance(guess, target);
           if (typos === 1 || (typos === 2 && target.length >= 5)) {
-            socket.emit('chat_message', { sender: "System", text: `'${text}' is very close! Keep trying!`, isGuess: false });
+            // FIX: Added the bulb emoji and a custom 'isCloseGuess' flag!
+            socket.emit('chat_message', { 
+              sender: "System", 
+              text: `'${text}' is very close! Keep trying! 💡`, 
+              isGuess: false,
+              isCloseGuess: true
+            });
           }
         }
       }
