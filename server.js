@@ -13,11 +13,14 @@ let players = {};
 let currentWord = "";
 let currentDrawerId = null;
 
-// --- NEW: Timer States ---
+// --- NEW: Turn and Round Tracking ---
 let timeRemaining = 0;
 let timerInterval = null; 
+let currentRound = 1;
+let drawQueue = [];      // Tracks who still needs to draw this round
+let priorityQueue = [];  // Tracks late joiners who get to draw first next round
 
-// NEW: Load words cleanly from the external CSV file
+// Load words cleanly from the external CSV file
 const fs = require('fs');
 const path = require('path');
 const wordsCsvPath = path.join(__dirname, 'words.csv');
@@ -26,13 +29,13 @@ const wordList = fs.readFileSync(wordsCsvPath, 'utf8')
   .split(',') // Split by comma
   .map(w => w.trim()) // Remove any accidental spaces
   .filter(w => w.length > 0); // Ignore any empty entries
-  
 
 function broadcastPlayers() {
   io.emit('update_players', Object.values(players));
 }
 
-function startNextRound() {
+// --- NEW: Fair Round-Robin Turn System ---
+function startNextTurn() {
   clearInterval(timerInterval); // Stop any old timers
   
   const playerIds = Object.keys(players);
@@ -42,7 +45,47 @@ function startNextRound() {
     return;
   }
 
-  currentDrawerId = playerIds[Math.floor(Math.random() * playerIds.length)];
+  // If everyone has drawn, the round is over!
+  if (drawQueue.length === 0) {
+    currentRound++;
+    
+    // Check if the standard 3-round match is finished
+    if (currentRound > 3) {
+      // Find the player with the highest score
+      let winnerId = playerIds.reduce((a, b) => players[a].score > players[b].score ? a : b);
+      io.emit('game_over', players[winnerId].name);
+      
+      // Reset scores and queues for a brand new match
+      Object.values(players).forEach(p => p.score = 0);
+      currentRound = 1;
+      drawQueue = Object.keys(players); 
+      priorityQueue = [];
+      
+      // Wait 8 seconds for the celebration screen, then restart
+      setTimeout(() => {
+        broadcastPlayers();
+        startNextTurn();
+      }, 8000); 
+      return;
+    } else {
+      // It is round 2 or 3! Build the new draw queue.
+      // Late joiners (priorityQueue) go first, then everyone else is added.
+      drawQueue = [...priorityQueue];
+      priorityQueue = [];
+      playerIds.forEach(id => {
+        if (!drawQueue.includes(id)) drawQueue.push(id);
+      });
+    }
+  }
+
+  // Pop the next person in line to be the drawer
+  currentDrawerId = drawQueue.shift();
+  
+  // If they disconnected while waiting in queue, just skip to the next person
+  if (!players[currentDrawerId]) {
+    return startNextTurn(); 
+  }
+
   currentWord = wordList[Math.floor(Math.random() * wordList.length)];
   timeRemaining = 60; // Set clock to 60 seconds
 
@@ -50,7 +93,7 @@ function startNextRound() {
   io.emit('clear_board'); 
   io.to(currentDrawerId).emit('secret_word', currentWord);
 
-  // --- NEW: The Ticking Clock ---
+  // --- The Ticking Clock ---
   timerInterval = setInterval(() => {
     timeRemaining--;
     io.emit('timer_update', timeRemaining); // Send tick to frontend
@@ -59,7 +102,7 @@ function startNextRound() {
       clearInterval(timerInterval);
       // Tell everyone the word if time runs out!
       io.emit('chat_message', { sender: "System", text: `Time's up! The word was: ${currentWord}`, isGuess: false });
-      setTimeout(startNextRound, 3000); 
+      setTimeout(startNextTurn, 3000); 
     }
   }, 1000);
 }
@@ -70,9 +113,14 @@ io.on('connection', (socket) => {
     broadcastPlayers(); 
 
     if (Object.keys(players).length >= 2 && !currentDrawerId) {
-      startNextRound(); 
+      // Brand new game starting
+      currentRound = 1;
+      drawQueue = Object.keys(players);
+      priorityQueue = [];
+      startNextTurn(); 
     } else if (currentDrawerId && players[currentDrawerId]) {
-      // FIX: Ensure late-joiners get the 'word' so the progressive hint math works!
+      // Someone joined mid-game! Add them to the priority queue for next round.
+      priorityQueue.push(socket.id);
       socket.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length, word: currentWord });
       socket.emit('timer_update', timeRemaining); // Give late joiners the current time
     }
@@ -82,19 +130,22 @@ io.on('connection', (socket) => {
   socket.on('draw', (data) => { if(socket.id === currentDrawerId) socket.broadcast.emit('draw', data) });
   socket.on('stop', () => { if(socket.id === currentDrawerId) socket.broadcast.emit('stop') });
   
-  // NEW: Let the drawer manually wipe the board for everyone!
+  // Let the drawer manually wipe the board for everyone!
   socket.on('clear_board', () => { if(socket.id === currentDrawerId) io.emit('clear_board') });
   
-  // NEW: Sync paint bucket fills!
+  // Sync paint bucket fills!
   socket.on('fill', (data) => { if(socket.id === currentDrawerId) socket.broadcast.emit('fill', data) });
   
-  // NEW: Sync Undo and Redo!
+  // Sync Undo and Redo!
   socket.on('undo', () => { if(socket.id === currentDrawerId) socket.broadcast.emit('undo') });
   socket.on('redo', () => { if(socket.id === currentDrawerId) socket.broadcast.emit('redo') });
 
   socket.on('chat_message', (text) => {
     const player = players[socket.id];
     if (!player) return;
+    
+    // FIX: Hard-block the drawer from sending ANY chat messages to the server to prevent cheating!
+    if (socket.id === currentDrawerId) return;
     
     if (currentWord && text.trim().toLowerCase() === currentWord.toLowerCase()) {
       clearInterval(timerInterval); 
@@ -104,33 +155,23 @@ io.on('connection', (socket) => {
       broadcastPlayers(); 
       io.emit('chat_message', { sender: player.name, text: text, isGuess: true });
       
-      // NEW: Tell all clients to play the "Ding!" sound!
+      // Tell all clients to play the "Ding!" sound!
       io.emit('correct_guess');
       
-      // NEW: Check if this player just reached 100 points
-      if (player.score >= 30) {
-        io.emit('game_over', player.name);
-        
-        // Reset all scores to 0 for the next match
-        Object.values(players).forEach(p => p.score = 0);
-        
-        // Wait 8 seconds for the celebration screen, then restart
-        setTimeout(() => {
-          broadcastPlayers();
-          startNextRound();
-        }, 8000); 
-      } else {
-        // Normal round progression
-        setTimeout(startNextRound, 3000);
-      }
-    }
-     else {
+      // Move to the next turn immediately (game over check is now handled in startNextTurn)
+      setTimeout(startNextTurn, 3000);
+    } else {
       io.emit('chat_message', { sender: player.name, text: text, isGuess: false });
     }
   });
 
   socket.on('disconnect', () => {
     delete players[socket.id];
+    
+    // Remove them from queues if they leave
+    drawQueue = drawQueue.filter(id => id !== socket.id);
+    priorityQueue = priorityQueue.filter(id => id !== socket.id);
+    
     broadcastPlayers(); 
     
     if (Object.keys(players).length < 2) {
@@ -139,7 +180,7 @@ io.on('connection', (socket) => {
       currentWord = "";
     } else if (socket.id === currentDrawerId) {
       clearInterval(timerInterval);
-      startNextRound(); 
+      startNextTurn(); 
     }
   });
 });
