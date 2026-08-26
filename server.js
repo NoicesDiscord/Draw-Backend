@@ -35,7 +35,6 @@ function getOrCreatePublicRoom() {
 }
 
 function createPrivateRoom(hostId, settings) {
-  // Generate a random 6-character room code (e.g., "X7B9A2")
   const newRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
   rooms[newRoomId] = createRoomObject(
     newRoomId, 
@@ -43,14 +42,16 @@ function createPrivateRoom(hostId, settings) {
     hostId, 
     parseInt(settings.maxPlayers) || 8, 
     parseInt(settings.rounds) || 3, 
-    parseInt(settings.drawTime) || 120
+    parseInt(settings.drawTime) || 120,
+    settings.customWords // FIX: Pass the custom words into the room!
   );
   return newRoomId;
 }
 
-function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime) {
+function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime, customWords = null) {
   return {
     id, isPrivate, hostId, maxPlayers, maxRounds, drawTime,
+    customWords, // FIX: Store the custom words array here!
     players: {}, currentWord: "", currentDrawerId: null,
     gameState: 'waiting', timeRemaining: 0, timerInterval: null,
     afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {}
@@ -137,9 +138,13 @@ function startNextTurn(roomId) {
   room.timeRemaining = 15; 
   
   let choices = [];
-  let tempWords = [...wordList];
+  // FIX: Prioritize the host's custom words if they provided any!
+  let tempWords = (room.customWords && room.customWords.length > 0) ? [...room.customWords] : [...wordList];
+  
   for (let i = 0; i < 5; i++) {
-    if (tempWords.length === 0) break;
+    // If they typed less than 5 custom words, fill the remaining buttons with normal words so the game doesn't break
+    if (tempWords.length === 0) tempWords = [...wordList]; 
+    
     const randIndex = Math.floor(Math.random() * tempWords.length);
     choices.push(tempWords.splice(randIndex, 1)[0]);
   }
