@@ -53,10 +53,11 @@ function createPrivateRoom(hostId, settings) {
 function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime, customWords = null, hintLevel = 2) {
   return {
     id, isPrivate, hostId, maxPlayers, maxRounds, drawTime,
-    customWords, hintLevel, // FIX: Store it in the room object!
+    customWords, hintLevel, 
     players: {}, currentWord: "", currentDrawerId: null,
     gameState: 'waiting', timeRemaining: 0, timerInterval: null,
-    afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {}
+    afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {},
+    correctGuessers: [] // NEW: Tracks who has already guessed the word in the current round!
   };
 }
 
@@ -171,6 +172,7 @@ function startDrawingPhase(roomId, selectedWord) {
   room.gameState = 'drawing';
   room.currentWord = selectedWord;
   room.timeRemaining = room.drawTime; 
+  room.correctGuessers = []; // NEW: Wipe the winners list clean at the start of a drawing! 
 
   // FIX: Include hintLevel in the round update
   io.to(roomId).emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound, maxRounds: room.maxRounds, hintLevel: room.hintLevel });
@@ -373,18 +375,48 @@ io.on('connection', (socket) => {
     if (socket.id === room.currentDrawerId) return;
     
     if (room.gameState === 'drawing' && room.currentWord && text.trim().toLowerCase() === room.currentWord.toLowerCase()) {
-      clearInterval(room.timerInterval); 
-      clearTimeout(room.afkTimeout); 
-      
-      player.score += 10;
-      if (room.players[room.currentDrawerId]) room.players[room.currentDrawerId].score += 5;
+      // Prevent multiple points if they already guessed it
+      if (room.correctGuessers && room.correctGuessers.includes(socket.id)) {
+        return socket.emit('chat_message', { sender: "System", text: `You already guessed the word!`, isGuess: false });
+      }
+
+      room.correctGuessers.push(socket.id);
+      const rank = room.correctGuessers.length;
+
+      // 1. Point Math: 1st=100, 2nd=80, 3rd=60, 4th=50, 5th=40, 6th+=30
+      let guessPoints = 30;
+      if (rank === 1) guessPoints = 100;
+      else if (rank === 2) guessPoints = 80;
+      else if (rank === 3) guessPoints = 60;
+      else if (rank === 4) guessPoints = 50;
+      else if (rank === 5) guessPoints = 40;
+
+      // 2. Drawer Math: Dynamically calculates points so they max out at exactly 90!
+      const totalGuessers = Math.max(1, Object.keys(room.players).length - 1);
+      const drawerPoints = Math.floor(90 / totalGuessers);
+
+      player.score += guessPoints;
+      if (room.players[room.currentDrawerId]) {
+        room.players[room.currentDrawerId].score += drawerPoints;
+      }
       
       broadcastPlayers(room.id); 
-      io.to(room.id).emit('chat_message', { sender: player.name, text: text, isGuess: true });
-      io.to(room.id).emit('correct_guess');
+      io.to(room.id).emit('chat_message', { sender: player.name, text: "guessed the word!", isGuess: true });
       
-      setTimeout(() => startNextTurn(room.id), 3000);
+      // 3. End round early ONLY if EVERYONE has guessed the word!
+      if (room.correctGuessers.length >= totalGuessers) {
+        clearInterval(room.timerInterval); 
+        clearTimeout(room.afkTimeout); 
+        io.to(room.id).emit('chat_message', { sender: "System", text: `Everyone guessed the word! The word was: ${room.currentWord}`, isGuess: false });
+        setTimeout(() => startNextTurn(room.id), 3000);
+      }
+
     } else {
+      // NEW ANTI-SPOIL SYSTEM: If you already guessed it, you can't type normal messages to spoil it for others!
+      if (room.gameState === 'drawing' && room.correctGuessers && room.correctGuessers.includes(socket.id)) {
+        return socket.emit('chat_message', { sender: "System", text: `Shh! You already guessed it. Don't spoil it for the others!`, isGuess: false });
+      }
+
       io.to(room.id).emit('chat_message', { sender: player.name, text: text, isGuess: false });
       
       if (room.gameState === 'drawing' && room.currentWord && room.currentWord.length > 2) {
