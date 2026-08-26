@@ -89,7 +89,8 @@ function startNextTurn() {
   currentWord = wordList[Math.floor(Math.random() * wordList.length)];
   timeRemaining = 60; // Set clock to 60 seconds
 
-  io.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length, word: currentWord });
+  // FIX: Attach the currentRound to the update!
+  io.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length, word: currentWord, currentRound });
   io.emit('clear_board'); 
   io.to(currentDrawerId).emit('secret_word', currentWord);
 
@@ -121,7 +122,8 @@ io.on('connection', (socket) => {
     } else if (currentDrawerId && players[currentDrawerId]) {
       // Someone joined mid-game! Add them to the priority queue for next round.
       priorityQueue.push(socket.id);
-      socket.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length, word: currentWord });
+      // FIX: Ensure late joiners also see what round it is!
+      socket.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length, word: currentWord, currentRound });
       socket.emit('timer_update', timeRemaining); // Give late joiners the current time
     }
   });
