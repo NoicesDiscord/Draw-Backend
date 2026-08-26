@@ -57,7 +57,9 @@ function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime
     players: {}, currentWord: "", currentDrawerId: null,
     gameState: 'waiting', timeRemaining: 0, timerInterval: null,
     afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {},
-    correctGuessers: [] // NEW: Tracks who has already guessed the word in the current round!
+    correctGuessers: [], 
+    // NEW: Load the full word list into the room's memory so we can delete them as they are played!
+    availableWords: customWords && customWords.length > 0 ? [...customWords] : [...wordList]
   };
 }
 
@@ -139,13 +141,16 @@ function startNextTurn(roomId) {
   room.timeRemaining = 15; 
   
   let choices = [];
-  let tempWords = (room.customWords && room.customWords.length > 0) ? [...room.customWords] : [...wordList];
   
   for (let i = 0; i < 5; i++) {
-    if (tempWords.length === 0) tempWords = [...wordList]; 
+    // FIX: If the lobby plays so many rounds that they completely run out of words, refill the bucket!
+    if (room.availableWords.length === 0) {
+      room.availableWords = (room.customWords && room.customWords.length > 0) ? [...room.customWords] : [...wordList];
+    }
     
-    const randIndex = Math.floor(Math.random() * tempWords.length);
-    choices.push(tempWords.splice(randIndex, 1)[0]);
+    const randIndex = Math.floor(Math.random() * room.availableWords.length);
+    // Splice permanently removes the word from the available list so it can't repeat in this lobby!
+    choices.push(room.availableWords.splice(randIndex, 1)[0]);
   }
 
   io.to(roomId).emit('clear_board');
