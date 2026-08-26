@@ -13,15 +13,15 @@ let players = {};
 let currentWord = "";
 let currentDrawerId = null;
 
-// --- NEW: Turn and Round Tracking ---
+// --- Timers and States ---
 let timeRemaining = 0;
 let timerInterval = null; 
-let afkTimeout = null; // NEW: Tracks if the drawer is AFK
+let afkTimeout = null; 
 let currentRound = 1;
 let drawQueue = [];      
 let priorityQueue = [];  
+let activeVotes = {}; // NEW: Tracks active kick votes
 
-// Load words cleanly from the external CSV file
 const fs = require('fs');
 const path = require('path');
 const wordsCsvPath = path.join(__dirname, 'words.csv');
@@ -55,7 +55,7 @@ function getEditDistance(a, b) {
 
 function startNextTurn() {
   clearInterval(timerInterval); 
-  clearTimeout(afkTimeout); // Clear old AFK penalty timer
+  clearTimeout(afkTimeout); 
   
   const playerIds = Object.keys(players);
   if (playerIds.length < 2) {
@@ -93,7 +93,7 @@ function startNextTurn() {
   }
 
   currentWord = wordList[Math.floor(Math.random() * wordList.length)];
-  timeRemaining = 120; // FIX: Increased to 120 seconds for public lobbies 
+  timeRemaining = 120; 
 
   io.emit('round_update', { drawerName: players[currentDrawerId].name, wordLength: currentWord.length, word: currentWord, currentRound });
   io.emit('clear_board'); 
@@ -105,23 +105,24 @@ function startNextTurn() {
 
     if (timeRemaining <= 0) {
       clearInterval(timerInterval);
-      clearTimeout(afkTimeout); // Clean up
+      clearTimeout(afkTimeout); 
       io.emit('chat_message', { sender: "System", text: `Time's up! The word was: ${currentWord}`, isGuess: false });
       setTimeout(startNextTurn, 3000); 
     }
   }, 1000);
 
-  // --- NEW: The 15-Second AFK Penalty ---
+  // FIX: Increased AFK Penalty to 40 seconds!
   afkTimeout = setTimeout(() => {
-    clearInterval(timerInterval); // Stop the main round clock
+    clearInterval(timerInterval); 
     io.emit('chat_message', { sender: "System", text: `Drawer is AFK! Skipping turn...`, isGuess: false });
     startNextTurn(); 
-  }, 30000); // FIX: Increased AFK penalty to 30 seconds
+  }, 40000); 
 }
 
 io.on('connection', (socket) => {
   socket.on('join_game', (playerName) => {
-    players[socket.id] = { name: playerName, score: 0 };
+    // FIX: Attach the socket.id to the player object so we can target them for kicks!
+    players[socket.id] = { id: socket.id, name: playerName, score: 0 };
     broadcastPlayers(); 
 
     if (Object.keys(players).length >= 2 && !currentDrawerId) {
@@ -136,29 +137,82 @@ io.on('connection', (socket) => {
     }
   });
 
-  // NEW: Helper to cancel the AFK penalty the moment they touch the canvas
   const cancelAfk = () => { if (socket.id === currentDrawerId) clearTimeout(afkTimeout); };
 
   socket.on('start', (data) => { if(socket.id === currentDrawerId) { cancelAfk(); socket.broadcast.emit('start', data); } });
   socket.on('draw', (data) => { if(socket.id === currentDrawerId) socket.broadcast.emit('draw', data) });
   socket.on('stop', () => { if(socket.id === currentDrawerId) socket.broadcast.emit('stop') });
   
-  // They hit clear or fill? They are actively playing! Cancel the AFK.
   socket.on('clear_board', () => { if(socket.id === currentDrawerId) { cancelAfk(); io.emit('clear_board'); } });
   socket.on('fill', (data) => { if(socket.id === currentDrawerId) { cancelAfk(); socket.broadcast.emit('fill', data); } });
   
   socket.on('undo', () => { if(socket.id === currentDrawerId) socket.broadcast.emit('undo') });
   socket.on('redo', () => { if(socket.id === currentDrawerId) socket.broadcast.emit('redo') });
 
+  // --- NEW: Vote Kick Logic ---
+  socket.on('initiate_votekick', (targetId) => {
+    const initiator = players[socket.id];
+    const target = players[targetId];
+    if (!initiator || !target || activeVotes[targetId]) return;
+
+    activeVotes[targetId] = {
+      yes: new Set([socket.id]), // The person starting the vote automatically votes YES
+      no: new Set(),
+      targetName: target.name,
+      initiatorName: initiator.name
+    };
+
+    io.emit('chat_message', {
+      type: 'votekick',
+      targetId: targetId,
+      targetName: target.name,
+      initiatorName: initiator.name,
+      text: `${initiator.name} has voted to kick ${target.name}. Do you wish to kick this player from the lobby?`
+    });
+
+    // Votes expire after 60 seconds if inconclusive
+    setTimeout(() => {
+      if (activeVotes[targetId]) {
+        io.emit('chat_message', { sender: "System", text: `Vote to kick ${target.name} expired.`, isGuess: false });
+        delete activeVotes[targetId];
+      }
+    }, 60000);
+  });
+
+  socket.on('submit_votekick', (data) => {
+    const { targetId, vote } = data; 
+    const voteSession = activeVotes[targetId];
+    if (!voteSession || !players[socket.id]) return;
+
+    if (vote === 'yes') voteSession.yes.add(socket.id);
+    else voteSession.no.add(socket.id);
+
+    const totalPlayers = Object.keys(players).length;
+    const requiredVotes = Math.floor(totalPlayers / 2) + 1; // Strict majority (> 50%)
+
+    if (voteSession.yes.size >= requiredVotes) {
+      io.emit('chat_message', { sender: "System", text: `${voteSession.targetName} was kicked from the lobby.`, isGuess: false });
+      
+      const targetSocket = io.sockets.sockets.get(targetId);
+      if (targetSocket) {
+        targetSocket.emit('kicked_from_server');
+        targetSocket.disconnect(true);
+      }
+      delete activeVotes[targetId];
+    } else if (voteSession.no.size >= requiredVotes || (voteSession.yes.size + voteSession.no.size === totalPlayers)) {
+      io.emit('chat_message', { sender: "System", text: `Vote to kick ${voteSession.targetName} failed.`, isGuess: false });
+      delete activeVotes[targetId];
+    }
+  });
+
   socket.on('chat_message', (text) => {
     const player = players[socket.id];
     if (!player) return;
-    
     if (socket.id === currentDrawerId) return;
     
     if (currentWord && text.trim().toLowerCase() === currentWord.toLowerCase()) {
       clearInterval(timerInterval); 
-      clearTimeout(afkTimeout); // FIX: Don't accidentally AFK skip if someone guesses instantly!
+      clearTimeout(afkTimeout); 
       
       player.score += 10;
       if (players[currentDrawerId]) players[currentDrawerId].score += 5;
@@ -178,11 +232,7 @@ io.on('connection', (socket) => {
         if (Math.abs(guess.length - target.length) <= 2) {
           const typos = getEditDistance(guess, target);
           if (typos === 1 || (typos === 2 && target.length >= 5)) {
-            socket.emit('chat_message', { 
-              sender: "System", 
-              text: `'${text}' is very close! Keep trying!`, 
-              isGuess: false 
-            });
+            socket.emit('chat_message', { sender: "System", text: `'${text}' is very close! Keep trying!`, isGuess: false });
           }
         }
       }
@@ -198,12 +248,12 @@ io.on('connection', (socket) => {
     
     if (Object.keys(players).length < 2) {
       clearInterval(timerInterval);
-      clearTimeout(afkTimeout); // Clean up
+      clearTimeout(afkTimeout); 
       currentDrawerId = null;
       currentWord = "";
     } else if (socket.id === currentDrawerId) {
       clearInterval(timerInterval);
-      clearTimeout(afkTimeout); // Clean up
+      clearTimeout(afkTimeout); 
       startNextTurn(); 
     }
   });
