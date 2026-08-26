@@ -22,7 +22,7 @@ const wordList = fs.readFileSync(wordsCsvPath, 'utf8')
   .map(w => w.trim()) 
   .filter(w => w.length > 0); 
 
-// --- NEW: Room Generators ---
+// --- NEW: Room Generators with Hint Level ---
 function getOrCreatePublicRoom() {
   for (const roomId in rooms) {
     if (!rooms[roomId].isPrivate && Object.keys(rooms[roomId].players).length < PUBLIC_MAX_PLAYERS) {
@@ -30,7 +30,8 @@ function getOrCreatePublicRoom() {
     }
   }
   const newRoomId = `public_${roomCounter++}`;
-  rooms[newRoomId] = createRoomObject(newRoomId, false, null, PUBLIC_MAX_PLAYERS, 3, 120);
+  // Public lobbies automatically default to hint level 2 (Normal)
+  rooms[newRoomId] = createRoomObject(newRoomId, false, null, PUBLIC_MAX_PLAYERS, 3, 120, null, 2);
   return newRoomId;
 }
 
@@ -43,15 +44,16 @@ function createPrivateRoom(hostId, settings) {
     parseInt(settings.maxPlayers) || 8, 
     parseInt(settings.rounds) || 3, 
     parseInt(settings.drawTime) || 120,
-    settings.customWords // FIX: Pass the custom words into the room!
+    settings.customWords,
+    parseInt(settings.hintLevel) || 2 // FIX: Extract the hint setting!
   );
   return newRoomId;
 }
 
-function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime, customWords = null) {
+function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime, customWords = null, hintLevel = 2) {
   return {
     id, isPrivate, hostId, maxPlayers, maxRounds, drawTime,
-    customWords, // FIX: Store the custom words array here!
+    customWords, hintLevel, // FIX: Store it in the room object!
     players: {}, currentWord: "", currentDrawerId: null,
     gameState: 'waiting', timeRemaining: 0, timerInterval: null,
     afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {}
@@ -99,7 +101,6 @@ function startNextTurn(roomId) {
 
   if (room.drawQueue.length === 0) {
     room.currentRound++;
-    // FIX: Check against custom maxRounds!
     if (room.currentRound > room.maxRounds) {
       room.gameState = 'waiting';
       let winnerId = playerIds.reduce((a, b) => room.players[a].score > room.players[b].score ? a : b);
@@ -110,7 +111,6 @@ function startNextTurn(roomId) {
       room.drawQueue = Object.keys(room.players); 
       room.priorityQueue = [];
       
-      // If it's a private room, force them back to the host waiting screen after the game ends
       setTimeout(() => {
         broadcastPlayers(roomId);
         if (room.isPrivate) {
@@ -138,11 +138,9 @@ function startNextTurn(roomId) {
   room.timeRemaining = 15; 
   
   let choices = [];
-  // FIX: Prioritize the host's custom words if they provided any!
   let tempWords = (room.customWords && room.customWords.length > 0) ? [...room.customWords] : [...wordList];
   
   for (let i = 0; i < 5; i++) {
-    // If they typed less than 5 custom words, fill the remaining buttons with normal words so the game doesn't break
     if (tempWords.length === 0) tempWords = [...wordList]; 
     
     const randIndex = Math.floor(Math.random() * tempWords.length);
@@ -172,10 +170,10 @@ function startDrawingPhase(roomId, selectedWord) {
   
   room.gameState = 'drawing';
   room.currentWord = selectedWord;
-  // FIX: Use the custom draw time!
   room.timeRemaining = room.drawTime; 
 
-  io.to(roomId).emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound, maxRounds: room.maxRounds });
+  // FIX: Include hintLevel in the round update
+  io.to(roomId).emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound, maxRounds: room.maxRounds, hintLevel: room.hintLevel });
   io.to(room.currentDrawerId).emit('secret_word', room.currentWord);
 
   room.timerInterval = setInterval(() => {
@@ -199,25 +197,20 @@ function startDrawingPhase(roomId, selectedWord) {
 
 io.on('connection', (socket) => {
   socket.on('join_game', (data) => {
-    // We now expect an object: { playerName, roomId (optional), privateSettings (optional) }
     const playerName = typeof data === 'string' ? data : data.playerName;
     const requestedRoomId = data.roomId;
     const privateSettings = data.privateSettings;
 
     let roomId;
 
-    // 1. Determine Room Logic
     if (privateSettings) {
-      // Create a brand new private room
       roomId = createPrivateRoom(socket.id, privateSettings);
     } else if (requestedRoomId) {
-      // Trying to join via an Invite Link
       if (!rooms[requestedRoomId]) {
         return socket.emit('room_error', "This room does not exist or has expired.");
       }
       roomId = requestedRoomId;
     } else {
-      // Standard Public Matchmaking
       roomId = getOrCreatePublicRoom();
     }
 
@@ -227,26 +220,24 @@ io.on('connection', (socket) => {
       return socket.emit('room_error', "This room is currently full.");
     }
 
-    // 2. Join the Room
     socket.join(roomId);
     socket.roomId = roomId; 
     room.players[socket.id] = { id: socket.id, name: playerName, score: 0 };
     
-    // Send room metadata back to the client so they know if they are host!
+    // FIX: Include hintLevel in the initial join metadata
     socket.emit('room_joined', { 
       roomId: room.id, 
       isPrivate: room.isPrivate, 
       isHost: room.hostId === socket.id,
       maxRounds: room.maxRounds,
-      drawTime: room.drawTime
+      drawTime: room.drawTime,
+      hintLevel: room.hintLevel
     });
 
     broadcastPlayers(roomId); 
     io.to(roomId).emit('chat_message', { sender: "System", text: `${playerName} joined the lobby. (${Object.keys(room.players).length}/${room.maxPlayers})`, isGuess: false });
 
-    // 3. Start or Sync the Game
     if (!room.isPrivate) {
-      // Public Rooms Auto-Start
       if (Object.keys(room.players).length >= 2 && !room.currentDrawerId) {
         room.currentRound = 1;
         room.drawQueue = Object.keys(room.players);
@@ -256,7 +247,6 @@ io.on('connection', (socket) => {
         syncLateJoiner(socket, room);
       }
     } else {
-      // Private Rooms wait for Host to press Start
       if (room.gameState === 'waiting') {
         socket.emit('waiting_for_host');
       } else {
@@ -270,15 +260,13 @@ io.on('connection', (socket) => {
     if (room.gameState === 'choosing') {
       socket.emit('choosing_word', { drawerName: room.players[room.currentDrawerId].name });
     } else if (room.gameState === 'drawing') {
-      socket.emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound, maxRounds: room.maxRounds });
-      
-      // FIX: Ask the current drawer to take a screenshot and send it to this specific late joiner!
+      // FIX: Include hintLevel for late joiners!
+      socket.emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound, maxRounds: room.maxRounds, hintLevel: room.hintLevel });
       io.to(room.currentDrawerId).emit('request_canvas_state', socket.id);
     }
     socket.emit('timer_update', room.timeRemaining); 
   }
 
-  // --- NEW: Host manually starting a private game ---
   socket.on('start_private_game', () => {
     const room = rooms[socket.roomId];
     if (room && room.isPrivate && room.hostId === socket.id && Object.keys(room.players).length >= 2) {
@@ -307,16 +295,15 @@ io.on('connection', (socket) => {
   
   socket.on('undo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('undo') });
   socket.on('redo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('redo') });
-  // NEW: Catch the snapshot from the drawer and hand it directly to the late joiner!
+  
   socket.on('send_canvas_state', ({ targetId, canvasData }) => {
     io.to(targetId).emit('load_canvas_state', canvasData);
   });
-  // Vote Kick Logic 
+  
   socket.on('initiate_votekick', (targetId) => {
     const room = rooms[socket.roomId];
     if (!room) return;
     
-    // Prevent kicking the host of a private room
     if (room.isPrivate && room.hostId === targetId) {
        return socket.emit('chat_message', { sender: "System", text: `You cannot vote kick the room host.`, isGuess: false });
     }
@@ -427,13 +414,12 @@ io.on('connection', (socket) => {
     room.drawQueue = room.drawQueue.filter(id => id !== socket.id);
     room.priorityQueue = room.priorityQueue.filter(id => id !== socket.id);
     
-    // Auto-Host Reassignment: If host leaves, make someone else the host!
     if (room.isPrivate && socket.id === room.hostId) {
       const remainingIds = Object.keys(room.players);
       if (remainingIds.length > 0) {
         room.hostId = remainingIds[0];
-        // Tell the new host they are in charge now
-        io.to(room.hostId).emit('room_joined', { roomId: room.id, isPrivate: true, isHost: true, maxRounds: room.maxRounds, drawTime: room.drawTime });
+        // FIX: Ensure the new host also gets the hint level data so their UI doesn't break
+        io.to(room.hostId).emit('room_joined', { roomId: room.id, isPrivate: true, isHost: true, maxRounds: room.maxRounds, drawTime: room.drawTime, hintLevel: room.hintLevel });
       }
     }
 
