@@ -234,9 +234,8 @@ io.on('connection', (socket) => {
         return socket.emit('room_error', "This room does not exist or has expired.");
       }
       
-      // NEW: If they found this room in the browser, demand a password if it has one!
-      // If isBrowserJoin is false/undefined, they used an invite link, which bypasses the password!
-      if (room.isPrivate && isBrowserJoin && room.password && room.password !== providedPassword) {
+      // FIX: Demand a password for ALL private rooms that have one, even from invite links!
+      if (room.isPrivate && room.password && room.password !== providedPassword) {
         return socket.emit('room_error', "Incorrect room password.");
       }
       
