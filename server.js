@@ -9,6 +9,20 @@ const server = http.createServer(app);
  
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
+// --- NEW: API Route for Browsing Lobbies ---
+app.get('/api/rooms', (req, res) => {
+  const customRooms = Object.values(rooms)
+    .filter(r => r.isPrivate)
+    .map(r => ({
+      id: r.id,
+      hostName: r.players[r.hostId] ? r.players[r.hostId].name : 'Unknown Host',
+      players: Object.keys(r.players).length,
+      maxPlayers: r.maxPlayers,
+      hasPassword: !!r.password // Only tells frontend IF there is a password, doesn't reveal it!
+    }));
+  res.json(customRooms);
+});
+
 const PUBLIC_MAX_PLAYERS = 8;
 let roomCounter = 1;
 const rooms = {}; 
@@ -45,20 +59,20 @@ function createPrivateRoom(hostId, settings) {
     parseInt(settings.rounds) || 3, 
     parseInt(settings.drawTime) || 120,
     settings.customWords,
-    parseInt(settings.hintLevel) || 2 // FIX: Extract the hint setting!
+    parseInt(settings.hintLevel) || 2,
+    settings.password || null // NEW: Password support!
   );
   return newRoomId;
 }
 
-function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime, customWords = null, hintLevel = 2) {
+function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime, customWords = null, hintLevel = 2, password = null) {
   return {
     id, isPrivate, hostId, maxPlayers, maxRounds, drawTime,
-    customWords, hintLevel, 
+    customWords, hintLevel, password, // NEW: Saves the password
     players: {}, currentWord: "", currentDrawerId: null,
     gameState: 'waiting', timeRemaining: 0, timerInterval: null,
     afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {},
     correctGuessers: [], 
-    // NEW: Load the full word list into the room's memory so we can delete them as they are played!
     availableWords: customWords && customWords.length > 0 ? [...customWords] : [...wordList]
   };
 }
@@ -207,15 +221,25 @@ io.on('connection', (socket) => {
     const playerName = typeof data === 'string' ? data : data.playerName;
     const requestedRoomId = data.roomId;
     const privateSettings = data.privateSettings;
+    const providedPassword = data.password; // NEW
+    const isBrowserJoin = data.isBrowserJoin; // NEW
 
     let roomId;
 
     if (privateSettings) {
       roomId = createPrivateRoom(socket.id, privateSettings);
     } else if (requestedRoomId) {
-      if (!rooms[requestedRoomId]) {
+      const room = rooms[requestedRoomId];
+      if (!room) {
         return socket.emit('room_error', "This room does not exist or has expired.");
       }
+      
+      // NEW: If they found this room in the browser, demand a password if it has one!
+      // If isBrowserJoin is false/undefined, they used an invite link, which bypasses the password!
+      if (room.isPrivate && isBrowserJoin && room.password && room.password !== providedPassword) {
+        return socket.emit('room_error', "Incorrect room password.");
+      }
+      
       roomId = requestedRoomId;
     } else {
       roomId = getOrCreatePublicRoom();
