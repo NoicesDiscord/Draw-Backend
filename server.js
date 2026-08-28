@@ -68,11 +68,10 @@ function createPrivateRoom(hostId, settings) {
 function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime, customWords = null, hintLevel = 2, password = null) {
   return {
     id, isPrivate, hostId, maxPlayers, maxRounds, drawTime,
-    customWords, hintLevel, password, // NEW: Saves the password
     players: {}, currentWord: "", currentDrawerId: null,
-    gameState: 'waiting', timeRemaining: 0, timerInterval: null,
-    afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {},
-    correctGuessers: [], 
+        gameState: 'waiting', timeRemaining: 0, timerInterval: null,
+        afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {},
+        correctGuessers: [], turnScores: {}, // NEW: Tracks points earned strictly during this turn!
     availableWords: customWords && customWords.length > 0 ? [...customWords] : [...wordList]
   };
 }
@@ -189,11 +188,15 @@ function startDrawingPhase(roomId, selectedWord) {
   clearTimeout(room.afkTimeout);
   
   room.gameState = 'drawing';
-  room.currentWord = selectedWord;
-  room.timeRemaining = room.drawTime; 
-  room.correctGuessers = []; // NEW: Wipe the winners list clean at the start of a drawing! 
+      room.currentWord = selectedWord;
+      room.timeRemaining = room.drawTime; 
+      room.correctGuessers = []; // NEW: Wipe the winners list clean at the start of a drawing! 
+      
+      // NEW: Reset turn scores for the new round!
+      room.turnScores = {};
+      Object.keys(room.players).forEach(id => room.turnScores[id] = 0);
 
-  // FIX: Include hintLevel in the round update
+      // FIX: Include hintLevel in the round update
   io.to(roomId).emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound, maxRounds: room.maxRounds, hintLevel: room.hintLevel });
   io.to(room.currentDrawerId).emit('secret_word', room.currentWord);
 
@@ -202,11 +205,16 @@ function startDrawingPhase(roomId, selectedWord) {
     io.to(roomId).emit('timer_update', room.timeRemaining); 
 
     if (room.timeRemaining <= 0) {
-      clearInterval(room.timerInterval);
-      clearTimeout(room.afkTimeout); 
-      io.to(roomId).emit('chat_message', { sender: "System", text: `Time's up! The word was: ${room.currentWord}`, isGuess: false });
-      setTimeout(() => startNextTurn(roomId), 3000); 
-    }
+          clearInterval(room.timerInterval);
+          clearTimeout(room.afkTimeout); 
+          
+          // NEW: Gather scores and emit the summary screen, then wait 4 seconds!
+          const summaryData = Object.values(room.players).map(p => ({ name: p.name, earned: room.turnScores[p.id] || 0 })).sort((a, b) => b.earned - a.earned);
+          io.to(roomId).emit('turn_summary', { word: room.currentWord, reason: "Time's up!", scores: summaryData });
+          
+          io.to(roomId).emit('chat_message', { sender: "System", text: `Time's up! The word was: ${room.currentWord}`, isGuess: false });
+          setTimeout(() => startNextTurn(roomId), 4000); 
+        }
   }, 1000);
 
   room.afkTimeout = setTimeout(() => {
@@ -421,23 +429,31 @@ io.on('connection', (socket) => {
 
       // 2. Drawer Math: Dynamically calculates points so they max out at exactly 90!
       const totalGuessers = Math.max(1, Object.keys(room.players).length - 1);
-      const drawerPoints = Math.floor(90 / totalGuessers);
+          const drawerPoints = Math.floor(90 / totalGuessers);
 
-      player.score += guessPoints;
-      if (room.players[room.currentDrawerId]) {
-        room.players[room.currentDrawerId].score += drawerPoints;
-      }
-      
-      broadcastPlayers(room.id); 
-      io.to(room.id).emit('chat_message', { sender: player.name, text: "guessed the word!", isGuess: true });
-      
-      // 3. End round early ONLY if EVERYONE has guessed the word!
-      if (room.correctGuessers.length >= totalGuessers) {
-        clearInterval(room.timerInterval); 
-        clearTimeout(room.afkTimeout); 
-        io.to(room.id).emit('chat_message', { sender: "System", text: `Everyone guessed the word! The word was: ${room.currentWord}`, isGuess: false });
-        setTimeout(() => startNextTurn(room.id), 3000);
-      }
+          player.score += guessPoints;
+          room.turnScores[socket.id] = (room.turnScores[socket.id] || 0) + guessPoints; // NEW: Save for summary
+          
+          if (room.players[room.currentDrawerId]) {
+            room.players[room.currentDrawerId].score += drawerPoints;
+            room.turnScores[room.currentDrawerId] = (room.turnScores[room.currentDrawerId] || 0) + drawerPoints; // NEW
+          }
+          
+          broadcastPlayers(room.id); 
+          io.to(room.id).emit('chat_message', { sender: player.name, text: "guessed the word!", isGuess: true });
+          
+          // 3. End round early ONLY if EVERYONE has guessed the word!
+          if (room.correctGuessers.length >= totalGuessers) {
+            clearInterval(room.timerInterval); 
+            clearTimeout(room.afkTimeout); 
+            
+            // NEW: Emit summary data before advancing!
+            const summaryData = Object.values(room.players).map(p => ({ name: p.name, earned: room.turnScores[p.id] || 0 })).sort((a, b) => b.earned - a.earned);
+            io.to(room.id).emit('turn_summary', { word: room.currentWord, reason: "Everyone guessed the word!", scores: summaryData });
+
+            io.to(room.id).emit('chat_message', { sender: "System", text: `Everyone guessed the word! The word was: ${room.currentWord}`, isGuess: false });
+            setTimeout(() => startNextTurn(room.id), 4000);
+          }
 
     } else {
       // NEW ANTI-SPOIL SYSTEM: If you already guessed it, you can't type normal messages to spoil it for others!
@@ -520,24 +536,32 @@ socket.on('disconnect', () => {
       }
     } 
     // NEW & UPDATED: Catch edge cases if a player leaves during a drawing phase!
-    else if (room.gameState === 'drawing') {
-      const totalGuessers = remainingPlayers - 1;
+        else if (room.gameState === 'drawing') {
+          const totalGuessers = remainingPlayers - 1;
 
-      // Scenario A: The Drawer left
-      if (socket.id === room.currentDrawerId) {
-        clearInterval(room.timerInterval);
-        clearTimeout(room.afkTimeout); 
-        io.to(room.id).emit('chat_message', { sender: "System", text: `The drawer left! The word was: ${room.currentWord}`, isGuess: false });
-        setTimeout(() => startNextTurn(room.id), 3000);
-      } 
-      // Scenario B: The last clueless guesser left (Meaning everyone else left in the room already guessed it!)
-      else if (room.correctGuessers.length >= totalGuessers) {
-        clearInterval(room.timerInterval);
-        clearTimeout(room.afkTimeout); 
-        io.to(room.id).emit('chat_message', { sender: "System", text: `Everyone guessed the word! The word was: ${room.currentWord}`, isGuess: false });
-        setTimeout(() => startNextTurn(room.id), 3000);
-      }
-    }
+          // Scenario A: The Drawer left
+          if (socket.id === room.currentDrawerId) {
+            clearInterval(room.timerInterval);
+            clearTimeout(room.afkTimeout); 
+            
+            const summaryData = Object.values(room.players).map(p => ({ name: p.name, earned: room.turnScores[p.id] || 0 })).sort((a, b) => b.earned - a.earned);
+            io.to(room.id).emit('turn_summary', { word: room.currentWord, reason: "The drawer left!", scores: summaryData });
+            
+            io.to(room.id).emit('chat_message', { sender: "System", text: `The drawer left! The word was: ${room.currentWord}`, isGuess: false });
+            setTimeout(() => startNextTurn(room.id), 4000);
+          } 
+          // Scenario B: The last clueless guesser left (Meaning everyone else left in the room already guessed it!)
+          else if (room.correctGuessers.length >= totalGuessers) {
+            clearInterval(room.timerInterval);
+            clearTimeout(room.afkTimeout); 
+            
+            const summaryData = Object.values(room.players).map(p => ({ name: p.name, earned: room.turnScores[p.id] || 0 })).sort((a, b) => b.earned - a.earned);
+            io.to(room.id).emit('turn_summary', { word: room.currentWord, reason: "Everyone guessed the word!", scores: summaryData });
+
+            io.to(room.id).emit('chat_message', { sender: "System", text: `Everyone guessed the word! The word was: ${room.currentWord}`, isGuess: false });
+            setTimeout(() => startNextTurn(room.id), 4000);
+          }
+        }
   });
 });
 
