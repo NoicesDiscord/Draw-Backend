@@ -194,6 +194,7 @@ function startDrawingPhase(roomId, selectedWord) {
       
       // NEW: Reset turn scores for the new round!
       room.turnScores = {};
+      room.turnVoters = new Set(); // NEW: Reset voters so everyone can vote again!
       Object.keys(room.players).forEach(id => room.turnScores[id] = 0);
 
       // FIX: Include hintLevel in the round update
@@ -406,7 +407,10 @@ io.on('connection', (socket) => {
   socket.on('like_drawing', () => {
     const room = rooms[socket.roomId];
     const player = room?.players[socket.id];
-    if (room && player && socket.id !== room.currentDrawerId) {
+    // NEW: Check if they are in the turnVoters set to completely prevent spam!
+    if (room && player && socket.id !== room.currentDrawerId && (!room.turnVoters || !room.turnVoters.has(socket.id))) {
+      if (!room.turnVoters) room.turnVoters = new Set();
+      room.turnVoters.add(socket.id); // Lock them out for this turn
       io.to(room.id).emit('chat_message', { sender: "System", text: `${player.name} liked this drawing!`, isLike: true });
     }
   });
@@ -414,7 +418,10 @@ io.on('connection', (socket) => {
   socket.on('dislike_drawing', () => {
     const room = rooms[socket.roomId];
     const player = room?.players[socket.id];
-    if (room && player && socket.id !== room.currentDrawerId) {
+    // NEW: Check if they are in the turnVoters set to completely prevent spam!
+    if (room && player && socket.id !== room.currentDrawerId && (!room.turnVoters || !room.turnVoters.has(socket.id))) {
+      if (!room.turnVoters) room.turnVoters = new Set();
+      room.turnVoters.add(socket.id); // Lock them out for this turn
       io.to(room.id).emit('chat_message', { sender: "System", text: `${player.name} disliked this drawing!`, isDislike: true });
     }
   });
