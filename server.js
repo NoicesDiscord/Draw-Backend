@@ -402,6 +402,23 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --- NEW: Like & Dislike System ---
+  socket.on('like_drawing', () => {
+    const room = rooms[socket.roomId];
+    const player = room?.players[socket.id];
+    if (room && player && socket.id !== room.currentDrawerId) {
+      io.to(room.id).emit('chat_message', { sender: "System", text: `${player.name} liked this drawing!`, isLike: true });
+    }
+  });
+
+  socket.on('dislike_drawing', () => {
+    const room = rooms[socket.roomId];
+    const player = room?.players[socket.id];
+    if (room && player && socket.id !== room.currentDrawerId) {
+      io.to(room.id).emit('chat_message', { sender: "System", text: `${player.name} disliked this drawing!`, isDislike: true });
+    }
+  });
+
   socket.on('chat_message', (text) => {
     const room = rooms[socket.roomId];
     if (!room) return;
