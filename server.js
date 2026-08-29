@@ -118,23 +118,17 @@ function startNextTurn(roomId) {
   if (room.drawQueue.length === 0) {
     room.currentRound++;
     if (room.currentRound > room.maxRounds) {
-      room.gameState = 'waiting';
-      let winnerId = playerIds.reduce((a, b) => room.players[a].score > room.players[b].score ? a : b);
-      io.to(roomId).emit('game_over', room.players[winnerId].name);
+      room.gameState = 'game_over'; // Pauses the game loop
       
-      Object.values(room.players).forEach(p => p.score = 0);
-      room.currentRound = 1;
-      room.drawQueue = Object.keys(room.players); 
-      room.priorityQueue = [];
+      // NEW: Generate a sorted array of all players and their final scores
+      const finalStandings = playerIds
+        .map(id => ({ name: room.players[id].name, score: room.players[id].score }))
+        .sort((a, b) => b.score - a.score);
       
-      setTimeout(() => {
-        broadcastPlayers(roomId);
-        if (room.isPrivate) {
-          io.to(roomId).emit('waiting_for_host');
-        } else {
-          startNextTurn(roomId);
-        }
-      }, 8000); 
+      // Send the full stats array to the frontend
+      io.to(roomId).emit('game_over', finalStandings);
+      
+      // Notice we removed the setTimeout! The server now waits for the host to click "Proceed"
       return;
     } else {
       room.drawQueue = [...room.priorityQueue];
@@ -314,6 +308,32 @@ io.on('connection', (socket) => {
       room.priorityQueue = [];
       io.to(room.id).emit('game_started'); // NEW: Tell all clients the game is starting!
       startNextTurn(room.id);
+    }
+  });
+
+  // --- NEW: Manual Proceed to Lobby from Stats Screen ---
+  socket.on('return_to_lobby', () => {
+    const room = rooms[socket.roomId];
+    if (!room || room.gameState !== 'game_over') return;
+    
+    // Only the host can trigger this in private lobbies
+    if (room.isPrivate && room.hostId !== socket.id) return;
+    
+    room.gameState = 'waiting';
+    Object.values(room.players).forEach(p => p.score = 0);
+    room.currentRound = 1;
+    room.drawQueue = Object.keys(room.players);
+    room.priorityQueue = [];
+    room.currentDrawerId = null;
+    room.currentWord = "";
+    
+    broadcastPlayers(room.id);
+    
+    if (room.isPrivate) {
+      io.to(room.id).emit('waiting_for_host');
+    } else {
+      // Public lobbies: just send them to the waiting area
+      io.to(room.id).emit('waiting_for_players');
     }
   });
 
