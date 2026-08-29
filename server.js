@@ -69,9 +69,9 @@ function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime
   return {
     id, isPrivate, hostId, maxPlayers, maxRounds, drawTime,
     players: {}, currentWord: "", currentDrawerId: null,
-        gameState: 'waiting', timeRemaining: 0, timerInterval: null,
-        afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {},
-        correctGuessers: [], turnScores: {}, // NEW: Tracks points earned strictly during this turn!
+    gameState: 'waiting', timeRemaining: 0, timerInterval: null,
+    afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {},
+    correctGuessers: [], turnScores: {}, underdogs: [], // NEW: Tracks underdogs
     availableWords: customWords && customWords.length > 0 ? [...customWords] : [...wordList]
   };
 }
@@ -182,17 +182,35 @@ function startDrawingPhase(roomId, selectedWord) {
   clearTimeout(room.afkTimeout);
   
   room.gameState = 'drawing';
-      room.currentWord = selectedWord;
-      room.timeRemaining = room.drawTime; 
-      room.correctGuessers = []; // NEW: Wipe the winners list clean at the start of a drawing! 
-      
-      // NEW: Reset turn scores for the new round!
-      room.turnScores = {};
-      room.turnVoters = new Set(); // NEW: Reset voters so everyone can vote again!
-      Object.keys(room.players).forEach(id => room.turnScores[id] = 0);
+  room.currentWord = selectedWord;
+  room.timeRemaining = room.drawTime; 
+  room.correctGuessers = []; 
+  
+  // NEW: Calculate Underdogs BEFORE wiping the turn scores!
+  // Anyone who played the last turn but scored 0 gets the buff, unless they draw next!
+  if (Object.keys(room.turnScores).length > 0) {
+    room.underdogs = Object.keys(room.players).filter(id => 
+      room.turnScores[id] === 0 && id !== room.currentDrawerId
+    );
+  } else {
+    room.underdogs = []; // First turn of the game gets no underdogs
+  }
 
-      // FIX: Include hintLevel in the round update
-  io.to(roomId).emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound, maxRounds: room.maxRounds, hintLevel: room.hintLevel });
+  // NEW: Reset turn scores for the new round!
+  room.turnScores = {};
+  room.turnVoters = new Set(); 
+  Object.keys(room.players).forEach(id => room.turnScores[id] = 0);
+
+  // FIX: Include hintLevel and underdogs in the round update
+  io.to(roomId).emit('round_update', { 
+    drawerName: room.players[room.currentDrawerId].name, 
+    wordLength: room.currentWord.length, 
+    word: room.currentWord, 
+    currentRound: room.currentRound, 
+    maxRounds: room.maxRounds, 
+    hintLevel: room.hintLevel,
+    underdogs: room.underdogs // NEW
+  });
   io.to(room.currentDrawerId).emit('secret_word', room.currentWord);
 
   room.timerInterval = setInterval(() => {
@@ -293,8 +311,15 @@ io.on('connection', (socket) => {
     if (room.gameState === 'choosing') {
       socket.emit('choosing_word', { drawerName: room.players[room.currentDrawerId].name });
     } else if (room.gameState === 'drawing') {
-      // FIX: Include hintLevel for late joiners!
-      socket.emit('round_update', { drawerName: room.players[room.currentDrawerId].name, wordLength: room.currentWord.length, word: room.currentWord, currentRound: room.currentRound, maxRounds: room.maxRounds, hintLevel: room.hintLevel });
+      socket.emit('round_update', { 
+        drawerName: room.players[room.currentDrawerId].name, 
+        wordLength: room.currentWord.length, 
+        word: room.currentWord, 
+        currentRound: room.currentRound, 
+        maxRounds: room.maxRounds, 
+        hintLevel: room.hintLevel,
+        underdogs: room.underdogs // NEW
+      });
       io.to(room.currentDrawerId).emit('request_canvas_state', socket.id);
     }
     socket.emit('timer_update', room.timeRemaining); 
@@ -464,9 +489,16 @@ io.on('connection', (socket) => {
       room.correctGuessers.push(socket.id);
       const rank = room.correctGuessers.length;
 
-      // 1. Point Math: 1st=100, 2nd=80, 3rd=60, 4th=50, 5th=40, 6th+=30
+      // 1. Point Math: 1st=150, 2nd=80, 3rd=60, 4th=50, 5th=40, 6th+=30
       let guessPoints = 30;
-      if (rank === 1) guessPoints = 100;
+      if (rank === 1) {
+        // NEW: Underdog ability! If they have the buff, they get Double Points (300)
+        if (room.underdogs && room.underdogs.includes(socket.id)) {
+          guessPoints = 300;
+        } else {
+          guessPoints = 150;
+        }
+      }
       else if (rank === 2) guessPoints = 80;
       else if (rank === 3) guessPoints = 60;
       else if (rank === 4) guessPoints = 50;
