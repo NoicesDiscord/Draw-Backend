@@ -305,7 +305,7 @@ io.on('connection', (socket) => {
     }
     socket.emit('timer_update', room.timeRemaining); 
   }
-
+ 
   socket.on('start_private_game', () => {
     const room = rooms[socket.roomId];
     if (room && room.isPrivate && room.hostId === socket.id && Object.keys(room.players).length >= 2) {
