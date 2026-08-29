@@ -312,6 +312,7 @@ io.on('connection', (socket) => {
       room.currentRound = 1;
       room.drawQueue = Object.keys(room.players);
       room.priorityQueue = [];
+      io.to(room.id).emit('game_started'); // NEW: Tell all clients the game is starting!
       startNextTurn(room.id);
     }
   });
