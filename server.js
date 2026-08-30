@@ -665,35 +665,50 @@ socket.on('disconnect', () => {
          io.to(room.id).emit('waiting_for_players');
       }
     } 
+    // --- NEW BUG FIX: Catch if the Drawer leaves while choosing a word! ---
+    else if (room.gameState === 'choosing' && socket.id === room.currentDrawerId) {
+      clearInterval(room.timerInterval);
+      clearTimeout(room.afkTimeout);
+      
+      io.to(room.id).emit('chat_message', { 
+        sender: "System", 
+        text: `The drawer left before picking a word! Skipping turn...`, 
+        isGuess: false 
+      });
+      
+      // Clear out the current drawer and immediately move to the next turn!
+      room.currentDrawerId = null;
+      startNextTurn(room.id);
+    }
     // NEW & UPDATED: Catch edge cases if a player leaves during a drawing phase!
-        else if (room.gameState === 'drawing') {
-          const totalGuessers = remainingPlayers - 1;
+    else if (room.gameState === 'drawing') {
+      const totalGuessers = remainingPlayers - 1;
 
-          // Scenario A: The Drawer left
-          if (socket.id === room.currentDrawerId) {
-            clearInterval(room.timerInterval);
-            clearTimeout(room.afkTimeout); 
-            
-            const summaryData = Object.values(room.players).map(p => ({ name: p.name, earned: room.turnScores[p.id] || 0 })).sort((a, b) => b.earned - a.earned);
-            io.to(room.id).emit('turn_summary', { word: room.currentWord, reason: "The drawer left!", scores: summaryData });
-            
-            io.to(room.id).emit('chat_message', { sender: "System", text: `The drawer left! The word was: ${room.currentWord}`, isGuess: false });
-            setTimeout(() => startNextTurn(room.id), 4000);
-          } 
-          // Scenario B: The last clueless guesser left (Meaning everyone else left in the room already guessed it!)
-          else if (room.correctGuessers.length >= totalGuessers) {
-            clearInterval(room.timerInterval);
-            clearTimeout(room.afkTimeout); 
-            
-            const summaryData = Object.values(room.players).map(p => ({ name: p.name, earned: room.turnScores[p.id] || 0 })).sort((a, b) => b.earned - a.earned);
-            io.to(room.id).emit('turn_summary', { word: room.currentWord, reason: "Everyone guessed the word!", scores: summaryData });
+      // Scenario A: The Drawer left
+      if (socket.id === room.currentDrawerId) {
+        clearInterval(room.timerInterval);
+        clearTimeout(room.afkTimeout); 
+        
+        const summaryData = Object.values(room.players).map(p => ({ name: p.name, earned: room.turnScores[p.id] || 0 })).sort((a, b) => b.earned - a.earned);
+        io.to(room.id).emit('turn_summary', { word: room.currentWord, reason: "The drawer left!", scores: summaryData });
+        
+        io.to(room.id).emit('chat_message', { sender: "System", text: `The drawer left! The word was: ${room.currentWord}`, isGuess: false });
+        setTimeout(() => startNextTurn(room.id), 4000);
+      } 
+      // Scenario B: The last clueless guesser left (Meaning everyone else left in the room already guessed it!)
+      else if (room.correctGuessers.length >= totalGuessers) {
+        clearInterval(room.timerInterval);
+        clearTimeout(room.afkTimeout); 
+        
+        const summaryData = Object.values(room.players).map(p => ({ name: p.name, earned: room.turnScores[p.id] || 0 })).sort((a, b) => b.earned - a.earned);
+        io.to(room.id).emit('turn_summary', { word: room.currentWord, reason: "Everyone guessed the word!", scores: summaryData });
 
-            io.to(room.id).emit('chat_message', { sender: "System", text: `Everyone guessed the word! The word was: ${room.currentWord}`, isGuess: false });
-            setTimeout(() => startNextTurn(room.id), 4000);
-          }
-        }
+        io.to(room.id).emit('chat_message', { sender: "System", text: `Everyone guessed the word! The word was: ${room.currentWord}`, isGuess: false });
+        setTimeout(() => startNextTurn(room.id), 4000);
+      }
+    }
   });
 });
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));      
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
