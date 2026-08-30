@@ -198,16 +198,16 @@ function startDrawingPhase(roomId, selectedWord) {
   room.correctGuessers = []; 
   
   // NEW: Calculate Underdogs based on Late Joiners!
-  // Find the 2nd highest score in the lobby
+  // Find the 3rd highest score in the lobby to balance the OP buff
   const allScores = Object.values(room.players).map(p => p.score).sort((a, b) => b - a);
-  const secondHighestScore = allScores.length > 1 ? allScores[1] : (allScores[0] || 0);
+  const thirdHighestScore = allScores.length > 2 ? allScores[2] : (allScores[allScores.length - 1] || 0);
 
-  // A player gets the buff if they joined Round 2 or later, AND their score is not close to 2nd place yet.
-  // We define "close" as being within 100 points of the 2nd highest score.
+  // A player gets the buff if they joined Round 2 or later, AND their score is not close to 3rd place yet.
+  // We define "close" as being at least 100 points behind the 3rd highest score.
   room.underdogs = Object.keys(room.players).filter(id => {
     const p = room.players[id];
-    const isLateJoiner = p.joinedAtRound >= 2; // FIX: Changed from 3 to 2!
-    const isCatchingUp = p.score < (secondHighestScore - 100);
+    const isLateJoiner = p.joinedAtRound >= 2; 
+    const isCatchingUp = p.score < (thirdHighestScore - 100);
     return isLateJoiner && isCatchingUp && id !== room.currentDrawerId;
   });
 
@@ -340,12 +340,12 @@ io.on('connection', (socket) => {
     
     // --- NEW: Instantly calculate and broadcast Underdog buff for late joiners! ---
     const allScores = Object.values(room.players).map(p => p.score).sort((a, b) => b - a);
-    const secondHighestScore = allScores.length > 1 ? allScores[1] : (allScores[0] || 0);
+    const thirdHighestScore = allScores.length > 2 ? allScores[2] : (allScores[allScores.length - 1] || 0);
 
     room.underdogs = Object.keys(room.players).filter(id => {
       const p = room.players[id];
-      const isLateJoiner = p.joinedAtRound >= 2; // FIX: Starts at Round 2
-      const isCatchingUp = p.score < (secondHighestScore - 100);
+      const isLateJoiner = p.joinedAtRound >= 2; 
+      const isCatchingUp = p.score < (thirdHighestScore - 100);
       return isLateJoiner && isCatchingUp && id !== room.currentDrawerId;
     });
     
