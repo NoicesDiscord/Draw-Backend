@@ -205,12 +205,27 @@ function startDrawingPhase(roomId, selectedWord) {
   Object.keys(room.players).forEach(id => room.turnScores[id] = 0);
 
   // --- NEW: Generate Shared Hint Order for ALL Players ---
-  const words = selectedWord.split(' ');
+  const words = [];
   const wordStartIndices = [];
-  let currentIdx = 0;
-  for (let w of words) {
-    wordStartIndices.push(currentIdx);
-    currentIdx += w.length + 1;
+  let currentWord = "";
+  let currentStart = -1;
+  
+  // Smart parsing: Separates letters/numbers from special characters
+  for (let i = 0; i < selectedWord.length; i++) {
+    if (/[a-zA-Z0-9]/.test(selectedWord[i])) {
+      if (currentWord === "") currentStart = i;
+      currentWord += selectedWord[i];
+    } else {
+      if (currentWord !== "") {
+        words.push(currentWord);
+        wordStartIndices.push(currentStart);
+        currentWord = "";
+      }
+    }
+  }
+  if (currentWord !== "") {
+    words.push(currentWord);
+    wordStartIndices.push(currentStart);
   }
   
   // Shuffle letters for each word independently
@@ -223,10 +238,10 @@ function startDrawingPhase(roomId, selectedWord) {
     return indices;
   });
   
-  const maxLength = Math.max(...words.map(w => w.length));
+  const maxLength = words.length > 0 ? Math.max(...words.map(w => w.length)) : 0;
   let allowedIndices = [];
   
-  // Round-Robin Distribution
+  // Round-Robin Distribution (Only runs on valid letters/numbers)
   for (let p = 0; p < maxLength; p++) {
     for (let wIdx = 0; wIdx < words.length; wIdx++) {
       if (p < wordPriorities[wIdx].length) {
