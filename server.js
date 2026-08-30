@@ -67,7 +67,7 @@ function createPrivateRoom(hostId, settings) {
 
 function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime, customWords = null, hintLevel = 2, password = null) {
   return {
-    id, isPrivate, hostId, maxPlayers, maxRounds, drawTime,
+    id, isPrivate, hostId, maxPlayers, maxRounds, drawTime, hintLevel, password,
     players: {}, currentWord: "", currentDrawerId: null,
     gameState: 'waiting', timeRemaining: 0, timerInterval: null,
     afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {},
