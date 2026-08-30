@@ -191,11 +191,11 @@ function startDrawingPhase(roomId, selectedWord) {
   const allScores = Object.values(room.players).map(p => p.score).sort((a, b) => b - a);
   const secondHighestScore = allScores.length > 1 ? allScores[1] : (allScores[0] || 0);
 
-  // A player gets the buff if they joined Round 3 or later, AND their score is not close to 2nd place yet.
+  // A player gets the buff if they joined Round 2 or later, AND their score is not close to 2nd place yet.
   // We define "close" as being within 100 points of the 2nd highest score.
   room.underdogs = Object.keys(room.players).filter(id => {
     const p = room.players[id];
-    const isLateJoiner = p.joinedAtRound >= 3;
+    const isLateJoiner = p.joinedAtRound >= 2; // FIX: Changed from 3 to 2!
     const isCatchingUp = p.score < (secondHighestScore - 100);
     return isLateJoiner && isCatchingUp && id !== room.currentDrawerId;
   });
@@ -311,6 +311,20 @@ io.on('connection', (socket) => {
     socket.roomId = roomId; 
     // NEW: Record the exact round this player joined!
     room.players[socket.id] = { id: socket.id, name: playerName, score: 0, joinedAtRound: room.currentRound || 1 };
+    
+    // --- NEW: Instantly calculate and broadcast Underdog buff for late joiners! ---
+    const allScores = Object.values(room.players).map(p => p.score).sort((a, b) => b - a);
+    const secondHighestScore = allScores.length > 1 ? allScores[1] : (allScores[0] || 0);
+
+    room.underdogs = Object.keys(room.players).filter(id => {
+      const p = room.players[id];
+      const isLateJoiner = p.joinedAtRound >= 2; // FIX: Starts at Round 2
+      const isCatchingUp = p.score < (secondHighestScore - 100);
+      return isLateJoiner && isCatchingUp && id !== room.currentDrawerId;
+    });
+    
+    // Broadcast the new underdogs list immediately to everyone in the room!
+    io.to(roomId).emit('update_underdogs', room.underdogs);
     
     // FIX: Include hintLevel in the initial join metadata
     socket.emit('room_joined', { 
