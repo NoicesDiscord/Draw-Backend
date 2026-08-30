@@ -186,14 +186,19 @@ function startDrawingPhase(roomId, selectedWord) {
   room.timeRemaining = room.drawTime; 
   room.correctGuessers = []; 
   
-  // NEW: Calculate Underdogs BEFORE wiping the turn scores!
-  if (Object.keys(room.turnScores).length > 0) {
-    room.underdogs = Object.keys(room.players).filter(id => 
-      room.turnScores[id] === 0 && id !== room.currentDrawerId
-    );
-  } else {
-    room.underdogs = []; 
-  }
+  // NEW: Calculate Underdogs based on Late Joiners!
+  // Find the 2nd highest score in the lobby
+  const allScores = Object.values(room.players).map(p => p.score).sort((a, b) => b - a);
+  const secondHighestScore = allScores.length > 1 ? allScores[1] : (allScores[0] || 0);
+
+  // A player gets the buff if they joined Round 3 or later, AND their score is not close to 2nd place yet.
+  // We define "close" as being within 100 points of the 2nd highest score.
+  room.underdogs = Object.keys(room.players).filter(id => {
+    const p = room.players[id];
+    const isLateJoiner = p.joinedAtRound >= 3;
+    const isCatchingUp = p.score < (secondHighestScore - 100);
+    return isLateJoiner && isCatchingUp && id !== room.currentDrawerId;
+  });
 
   room.turnScores = {};
   room.turnVoters = new Set(); 
@@ -304,7 +309,8 @@ io.on('connection', (socket) => {
 
     socket.join(roomId);
     socket.roomId = roomId; 
-    room.players[socket.id] = { id: socket.id, name: playerName, score: 0 };
+    // NEW: Record the exact round this player joined!
+    room.players[socket.id] = { id: socket.id, name: playerName, score: 0, joinedAtRound: room.currentRound || 1 };
     
     // FIX: Include hintLevel in the initial join metadata
     socket.emit('room_joined', { 
@@ -521,26 +527,28 @@ io.on('connection', (socket) => {
       room.correctGuessers.push(socket.id);
       const rank = room.correctGuessers.length;
 
-     // 1. Point Math: 1st=150, 2nd=80, 3rd=60, 4th=50, 5th=40, 6th+=30
+     // 1. Point Math: Base points per rank
       let guessPoints = 30;
+      if (rank === 1) guessPoints = 150;
+      else if (rank === 2) guessPoints = 80;
+      else if (rank === 3) guessPoints = 60;
+      else if (rank === 4) guessPoints = 50;
+      else if (rank === 5) guessPoints = 40;
+
+      // 2. NEW: Underdog ability! Double points for ANY rank!
+      if (room.underdogs && room.underdogs.includes(socket.id)) {
+        guessPoints *= 2;
+      }
+
+      // 3. --- 35% Time Reduction for First Guess ---
       if (rank === 1) {
-        // Underdog ability! If they have the buff, they get Double Points (300)
-        if (room.underdogs && room.underdogs.includes(socket.id)) {
-          guessPoints = 300;
-        } else {
-          guessPoints = 150;
-        }
-
-        // --- NEW: 35% Time Reduction for First Guess ---
         const totalTime = room.drawTime; 
-        const thresholdTime = totalTime * 0.55; // 60% of total time
-        const reductionAmount = totalTime * 0.35; // 35% of total time
+        const thresholdTime = totalTime * 0.60; 
+        const reductionAmount = totalTime * 0.35; 
 
-        // Only trigger if the remaining time is greater than or equal to 60% of the total clock
         if (room.timeRemaining >= thresholdTime) {
           room.timeRemaining -= Math.floor(reductionAmount);
           
-          // Announce the time drop to the lobby!
           io.to(room.id).emit('chat_message', { 
             sender: "System", 
             text: `⏰ First guess! The clock has been reduced by ${Math.floor(reductionAmount)} seconds!`, 
@@ -548,10 +556,6 @@ io.on('connection', (socket) => {
           });
         }
       }
-      else if (rank === 2) guessPoints = 85;
-      else if (rank === 3) guessPoints = 70;
-      else if (rank === 4) guessPoints = 60;
-      else if (rank === 5) guessPoints = 40;
 
       // 2. Drawer Math: Dynamically calculates points so they max out at exactly 90!
       const totalGuessers = Math.max(1, Object.keys(room.players).length - 1);
