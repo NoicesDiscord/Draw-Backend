@@ -187,21 +187,51 @@ function startDrawingPhase(roomId, selectedWord) {
   room.correctGuessers = []; 
   
   // NEW: Calculate Underdogs BEFORE wiping the turn scores!
-  // Anyone who played the last turn but scored 0 gets the buff, unless they draw next!
   if (Object.keys(room.turnScores).length > 0) {
     room.underdogs = Object.keys(room.players).filter(id => 
       room.turnScores[id] === 0 && id !== room.currentDrawerId
     );
   } else {
-    room.underdogs = []; // First turn of the game gets no underdogs
+    room.underdogs = []; 
   }
 
-  // NEW: Reset turn scores for the new round!
   room.turnScores = {};
   room.turnVoters = new Set(); 
   Object.keys(room.players).forEach(id => room.turnScores[id] = 0);
 
-  // FIX: Include hintLevel and underdogs in the round update
+  // --- NEW: Generate Shared Hint Order for ALL Players ---
+  const words = selectedWord.split(' ');
+  const wordStartIndices = [];
+  let currentIdx = 0;
+  for (let w of words) {
+    wordStartIndices.push(currentIdx);
+    currentIdx += w.length + 1;
+  }
+  
+  // Shuffle letters for each word independently
+  const wordPriorities = words.map(w => {
+    let indices = Array.from({ length: w.length }, (_, i) => i);
+    for (let i = indices.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [indices[i], indices[j]] = [indices[j], indices[i]];
+    }
+    return indices;
+  });
+  
+  const maxLength = Math.max(...words.map(w => w.length));
+  let allowedIndices = [];
+  
+  // Round-Robin Distribution
+  for (let p = 0; p < maxLength; p++) {
+    for (let wIdx = 0; wIdx < words.length; wIdx++) {
+      if (p < wordPriorities[wIdx].length) {
+        allowedIndices.push(wordStartIndices[wIdx] + wordPriorities[wIdx][p]);
+      }
+    }
+  }
+  room.hintOrder = allowedIndices; // Save it to the room object
+
+  // FIX: Include underdogs AND hintOrder in the round update
   io.to(roomId).emit('round_update', { 
     drawerName: room.players[room.currentDrawerId].name, 
     wordLength: room.currentWord.length, 
@@ -209,7 +239,8 @@ function startDrawingPhase(roomId, selectedWord) {
     currentRound: room.currentRound, 
     maxRounds: room.maxRounds, 
     hintLevel: room.hintLevel,
-    underdogs: room.underdogs // NEW
+    underdogs: room.underdogs,
+    hintOrder: room.hintOrder // NEW: Broadcast shared hints!
   });
   io.to(room.currentDrawerId).emit('secret_word', room.currentWord);
 
@@ -318,7 +349,8 @@ io.on('connection', (socket) => {
         currentRound: room.currentRound, 
         maxRounds: room.maxRounds, 
         hintLevel: room.hintLevel,
-        underdogs: room.underdogs // NEW
+        underdogs: room.underdogs,
+        hintOrder: room.hintOrder // NEW: Send hints to late joiners
       });
       io.to(room.currentDrawerId).emit('request_canvas_state', socket.id);
     }
