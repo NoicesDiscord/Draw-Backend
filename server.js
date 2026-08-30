@@ -501,7 +501,7 @@ io.on('connection', (socket) => {
 
         // --- NEW: 35% Time Reduction for First Guess ---
         const totalTime = room.drawTime; 
-        const thresholdTime = totalTime * 0.60; // 60% of total time
+        const thresholdTime = totalTime * 0.55; // 60% of total time
         const reductionAmount = totalTime * 0.35; // 35% of total time
 
         // Only trigger if the remaining time is greater than or equal to 60% of the total clock
