@@ -489,24 +489,41 @@ io.on('connection', (socket) => {
       room.correctGuessers.push(socket.id);
       const rank = room.correctGuessers.length;
 
-      // 1. Point Math: 1st=150, 2nd=80, 3rd=60, 4th=50, 5th=40, 6th+=30
+     // 1. Point Math: 1st=150, 2nd=80, 3rd=60, 4th=50, 5th=40, 6th+=30
       let guessPoints = 30;
       if (rank === 1) {
-        // NEW: Underdog ability! If they have the buff, they get Double Points (300)
+        // Underdog ability! If they have the buff, they get Double Points (300)
         if (room.underdogs && room.underdogs.includes(socket.id)) {
           guessPoints = 300;
         } else {
           guessPoints = 150;
         }
+
+        // --- NEW: 35% Time Reduction for First Guess ---
+        const totalTime = room.drawTime; 
+        const thresholdTime = totalTime * 0.60; // 60% of total time
+        const reductionAmount = totalTime * 0.35; // 35% of total time
+
+        // Only trigger if the remaining time is greater than or equal to 60% of the total clock
+        if (room.timeRemaining >= thresholdTime) {
+          room.timeRemaining -= Math.floor(reductionAmount);
+          
+          // Announce the time drop to the lobby!
+          io.to(room.id).emit('chat_message', { 
+            sender: "System", 
+            text: `⏰ First guess! The clock has been reduced by ${Math.floor(reductionAmount)} seconds!`, 
+            isGuess: false 
+          });
+        }
       }
-      else if (rank === 2) guessPoints = 80;
-      else if (rank === 3) guessPoints = 60;
-      else if (rank === 4) guessPoints = 50;
+      else if (rank === 2) guessPoints = 85;
+      else if (rank === 3) guessPoints = 70;
+      else if (rank === 4) guessPoints = 60;
       else if (rank === 5) guessPoints = 40;
 
       // 2. Drawer Math: Dynamically calculates points so they max out at exactly 90!
       const totalGuessers = Math.max(1, Object.keys(room.players).length - 1);
-          const drawerPoints = Math.floor(90 / totalGuessers);
+          const drawerPoints = Math.floor(100 / totalGuessers);
 
           player.score += guessPoints;
           room.turnScores[socket.id] = (room.turnScores[socket.id] || 0) + guessPoints; // NEW: Save for summary
