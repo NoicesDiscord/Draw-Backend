@@ -23,6 +23,17 @@ app.get('/api/rooms', (req, res) => {
   res.json(customRooms);
 });
 
+// --- NEW: API Route for Instant Password Validation ---
+app.get('/api/validate-password', (req, res) => {
+  const { roomId, password } = req.query;
+  const room = rooms[roomId];
+  if (!room) return res.json({ success: false, message: "This room does not exist or has expired." });
+  if (room.isPrivate && room.password && room.password !== password) {
+    return res.json({ success: false, message: "Incorrect room password." });
+  }
+  res.json({ success: true });
+});
+
 const PUBLIC_MAX_PLAYERS = 8;
 let roomCounter = 1;
 const rooms = {}; 
