@@ -44,8 +44,8 @@ function getOrCreatePublicRoom() {
     }
   }
   const newRoomId = `public_${roomCounter++}`;
-  // Public lobbies automatically default to hint level 2 (Normal)
-  rooms[newRoomId] = createRoomObject(newRoomId, false, null, PUBLIC_MAX_PLAYERS, 3, 120, null, 2);
+  // Public lobbies automatically default to hint level 4 (Max)
+  rooms[newRoomId] = createRoomObject(newRoomId, false, null, PUBLIC_MAX_PLAYERS, 3, 120, null, 4);
   return newRoomId;
 }
 
