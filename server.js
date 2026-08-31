@@ -569,7 +569,7 @@ io.on('connection', (socket) => {
 
      // 1. Point Math: Base points per rank
       let guessPoints = 30;
-      if (rank === 1) guessPoints = 150;
+      if (rank === 1) guessPoints = 200; // FIX: Increased 1st guesser points to 200
       else if (rank === 2) guessPoints = 80;
       else if (rank === 3) guessPoints = 60;
       else if (rank === 4) guessPoints = 50;
@@ -580,11 +580,11 @@ io.on('connection', (socket) => {
         guessPoints *= 2;
       }
 
-      // 3. --- 35% Time Reduction for First Guess ---
+      // 3. --- 30% Time Reduction for First Guess ---
       if (rank === 1) {
         const totalTime = room.drawTime; 
         const thresholdTime = totalTime * 0.60; 
-        const reductionAmount = totalTime * 0.35; 
+        const reductionAmount = totalTime * 0.30; // FIX: Reduced from 35% to 30% 
 
         if (room.timeRemaining >= thresholdTime) {
           room.timeRemaining -= Math.floor(reductionAmount);
