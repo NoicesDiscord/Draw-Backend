@@ -551,6 +551,9 @@ io.on('connection', (socket) => {
   });
 
   socket.on('chat_message', (text) => {
+    // FIX: Immediately drop abnormally massive text payloads to prevent Server Freezes (DOS)!
+    if (typeof text !== 'string' || text.length > 200) return; 
+
     const room = rooms[socket.roomId];
     if (!room) return;
     
