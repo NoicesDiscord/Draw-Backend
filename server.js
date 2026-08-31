@@ -352,7 +352,8 @@ function startDrawingPhase(roomId, selectedWord) {
 
 io.on('connection', (socket) => {
   socket.on('join_game', (data) => {
-    const playerName = typeof data === 'string' ? data : data.playerName;
+    if (!data) return; // FIX: Safe drop for null payloads
+    const playerName = typeof data === 'string' ? data : (data.playerName || "Unknown");
     const requestedRoomId = data.roomId;
     const privateSettings = data.privateSettings;
     const providedPassword = data.password; // NEW
@@ -468,6 +469,7 @@ io.on('connection', (socket) => {
   });
   // --- NEW: Live Settings Sync ---
   socket.on('update_room_settings', (settings) => {
+    if (!settings || typeof settings !== 'object') return; // FIX: Safe drop for null payloads
     const room = rooms[socket.roomId];
     if (room && room.isPrivate && room.hostId === socket.id) {
       if (settings.maxRounds) room.maxRounds = parseInt(settings.maxRounds);
@@ -534,6 +536,9 @@ io.on('connection', (socket) => {
   });
 
   socket.on('word_chosen', (word) => {
+    // FIX: Dictionary Injection Protection! Drops massive fake words to protect CPU.
+    if (typeof word !== 'string' || word.length > 100) return;
+    
     const room = rooms[socket.roomId];
     if (room && socket.id === room.currentDrawerId && room.gameState === 'choosing') {
       startDrawingPhase(room.id, word);
@@ -555,8 +560,9 @@ io.on('connection', (socket) => {
   socket.on('undo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('undo') });
   socket.on('redo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('redo') });
   
-  socket.on('send_canvas_state', ({ targetId, canvasData }) => {
-    // FIX: Prevents "Canvas Bombing". Drops payloads over ~500KB to prevent Server RAM crashes!
+  socket.on('send_canvas_state', (data) => {
+    if (!data || typeof data !== 'object') return; // FIX: Prevents "Null Destructuring" DOS crashes!
+    const { targetId, canvasData } = data;
     if (typeof canvasData !== 'string' || canvasData.length > 500000) return;
     io.to(targetId).emit('load_canvas_state', canvasData);
   });
@@ -597,6 +603,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('submit_votekick', (data) => {
+    if (!data || typeof data !== 'object') return; // FIX: Safe drop for null payloads
     const room = rooms[socket.roomId];
     if (!room) return;
     
