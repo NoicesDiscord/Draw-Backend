@@ -403,14 +403,16 @@ io.on('connection', (socket) => {
     // Broadcast the new underdogs list immediately to everyone in the room!
     io.to(roomId).emit('update_underdogs', room.underdogs);
     
-    // FIX: Include hintLevel in the initial join metadata
+    // FIX: Include full room settings in the initial join metadata
     socket.emit('room_joined', { 
       roomId: room.id, 
       isPrivate: room.isPrivate, 
       isHost: room.hostId === socket.id,
       maxRounds: room.maxRounds,
       drawTime: room.drawTime,
-      hintLevel: room.hintLevel
+      hintLevel: room.hintLevel,
+      maxPlayers: room.maxPlayers,
+      password: room.password // NEW: Let the frontend display the password in settings!
     });
 
     broadcastPlayers(roomId); 
@@ -462,6 +464,46 @@ io.on('connection', (socket) => {
       room.priorityQueue = [];
       io.to(room.id).emit('game_started'); // NEW: Tell all clients the game is starting!
       startNextTurn(room.id);
+    }
+  });
+  // --- NEW: Live Settings Sync ---
+  socket.on('update_room_settings', (settings) => {
+    const room = rooms[socket.roomId];
+    if (room && room.isPrivate && room.hostId === socket.id) {
+      if (settings.maxRounds) room.maxRounds = parseInt(settings.maxRounds);
+      if (settings.drawTime) room.drawTime = parseInt(settings.drawTime);
+      if (settings.hintLevel) room.hintLevel = parseInt(settings.hintLevel);
+      if (settings.maxPlayers) room.maxPlayers = parseInt(settings.maxPlayers);
+      io.to(room.id).emit('room_settings_updated', { maxRounds: room.maxRounds, drawTime: room.drawTime, hintLevel: room.hintLevel, maxPlayers: room.maxPlayers });
+    }
+  });
+
+  // --- NEW: Restart Lobby (Forces everyone back to waiting area) ---
+  socket.on('restart_lobby', () => {
+    const room = rooms[socket.roomId];
+    if (room && room.isPrivate && room.hostId === socket.id) {
+      room.gameState = 'waiting';
+      Object.values(room.players).forEach(p => p.score = 0);
+      room.currentRound = 1;
+      room.drawQueue = Object.keys(room.players);
+      room.priorityQueue = [];
+      room.currentDrawerId = null;
+      room.currentWord = "";
+      room.correctGuessers = [];
+      clearInterval(room.timerInterval);
+      clearTimeout(room.afkTimeout);
+      broadcastPlayers(room.id);
+      io.to(room.id).emit('waiting_for_host'); // Pushes everyone back to the canvas settings screen
+    }
+  });
+
+  // --- NEW: Transfer Host ---
+  socket.on('transfer_host', (targetId) => {
+    const room = rooms[socket.roomId];
+    if (room && room.isPrivate && room.hostId === socket.id && room.players[targetId]) {
+      room.hostId = targetId;
+      io.to(room.id).emit('host_updated', targetId);
+      io.to(room.id).emit('chat_message', { sender: "System", text: `${room.players[targetId].name} is now the host.`, isGuess: false });
     }
   });
 
