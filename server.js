@@ -91,7 +91,33 @@ function broadcastPlayers(roomId) {
   const room = rooms[roomId];
   if (room) io.to(roomId).emit('update_players', Object.values(room.players));
 }
-
+// --- NEW: Secure Server-Side Hint Engine ---
+function getRevealedChars(room) {
+  if (!room.currentWord || !room.hintOrder) return {};
+  const totalLetters = (room.currentWord.match(/[a-zA-Z0-9]/g) || []).length;
+  let dynamicMaxHints = 0;
+  if (totalLetters > 2) {
+    if (room.hintLevel == 1) dynamicMaxHints = Math.floor(totalLetters * 0.40);
+    if (room.hintLevel == 2) dynamicMaxHints = Math.floor(totalLetters * 0.50);
+    if (room.hintLevel == 3) dynamicMaxHints = Math.floor(totalLetters * 0.60);
+    if (room.hintLevel == 4) dynamicMaxHints = Math.floor(totalLetters * 0.70);
+    if (dynamicMaxHints >= totalLetters) dynamicMaxHints = totalLetters - 1;
+    if (dynamicMaxHints < 0) dynamicMaxHints = 0;
+  }
+  const cappedIndices = room.hintOrder.slice(0, dynamicMaxHints);
+  let revealCount = 0;
+  if (dynamicMaxHints > 0 && room.timeRemaining > 0 && room.timeRemaining <= room.drawTime) {
+    const timeElapsed = room.drawTime - Math.min(room.timeRemaining, room.drawTime);
+    const effectiveProgress = Math.max(0, (timeElapsed - (room.drawTime * 0.15)) / (room.drawTime * 0.85));
+    revealCount = Math.floor(effectiveProgress * (dynamicMaxHints + 1));
+    revealCount = Math.min(dynamicMaxHints, revealCount);
+  }
+  const revealedChars = {};
+  cappedIndices.slice(0, revealCount).forEach(idx => {
+     revealedChars[idx] = room.currentWord[idx].toUpperCase(); // Only hands out the exact letters!
+  });
+  return revealedChars;
+}
 function getEditDistance(a, b) {
   if (a.length === 0) return b.length;
   if (b.length === 0) return a.length;
@@ -262,22 +288,45 @@ function startDrawingPhase(roomId, selectedWord) {
   }
   room.hintOrder = allowedIndices; // Save it to the room object
 
-  // FIX: Include underdogs AND hintOrder in the round update
+  // --- NEW: Generate Secure Word Skeleton for Guessers ---
+  const skeleton = [];
+  if (selectedWord) {
+    let currentBlock = { isWord: /[a-zA-Z0-9]/.test(selectedWord[0]), text: selectedWord[0], length: 1 };
+    for (let i = 1; i < selectedWord.length; i++) {
+      const isAlpha = /[a-zA-Z0-9]/.test(selectedWord[i]);
+      if (isAlpha === currentBlock.isWord) {
+        currentBlock.text += selectedWord[i];
+        currentBlock.length++;
+      } else {
+        skeleton.push(currentBlock.isWord ? { isWord: true, length: currentBlock.length } : { isWord: false, text: currentBlock.text });
+        currentBlock = { isWord: isAlpha, text: selectedWord[i], length: 1 };
+      }
+    }
+    skeleton.push(currentBlock.isWord ? { isWord: true, length: currentBlock.length } : { isWord: false, text: currentBlock.text });
+  }
+  room.skeleton = skeleton;
+
+  // FIX: Remove 'word' from the broadcast so hackers can't see it in Dev Tools!
   io.to(roomId).emit('round_update', { 
     drawerName: room.players[room.currentDrawerId].name, 
     wordLength: room.currentWord.length, 
-    word: room.currentWord, 
+    skeleton: room.skeleton, // Send structure, not the word!
     currentRound: room.currentRound, 
     maxRounds: room.maxRounds, 
     hintLevel: room.hintLevel,
-    underdogs: room.underdogs,
-    hintOrder: room.hintOrder // NEW: Broadcast shared hints!
+    underdogs: room.underdogs
   });
-  io.to(room.currentDrawerId).emit('secret_word', room.currentWord);
+  
+  io.to(room.currentDrawerId).emit('secret_word', room.currentWord); // Only the drawer gets this!
 
   room.timerInterval = setInterval(() => {
     room.timeRemaining--;
-    io.to(roomId).emit('timer_update', room.timeRemaining); 
+    
+    // Server now calculates the hints securely and sends them with the timer!
+    io.to(roomId).emit('timer_update', { 
+      time: room.timeRemaining, 
+      revealedChars: getRevealedChars(room) 
+    }); 
 
     if (room.timeRemaining <= 0) {
           clearInterval(room.timerInterval);
@@ -391,16 +440,16 @@ io.on('connection', (socket) => {
       socket.emit('round_update', { 
         drawerName: room.players[room.currentDrawerId].name, 
         wordLength: room.currentWord.length, 
-        word: room.currentWord, 
+        skeleton: room.skeleton, // Send secure skeleton
         currentRound: room.currentRound, 
         maxRounds: room.maxRounds, 
         hintLevel: room.hintLevel,
-        underdogs: room.underdogs,
-        hintOrder: room.hintOrder // NEW: Send hints to late joiners
+        underdogs: room.underdogs
       });
       io.to(room.currentDrawerId).emit('request_canvas_state', socket.id);
     }
-    socket.emit('timer_update', room.timeRemaining); 
+    // Sync the current hint state instantly!
+    socket.emit('timer_update', { time: room.timeRemaining, revealedChars: getRevealedChars(room) }); 
   }
  
   socket.on('start_private_game', () => {
@@ -617,6 +666,9 @@ io.on('connection', (socket) => {
           broadcastPlayers(room.id); 
           io.to(room.id).emit('chat_message', { sender: player.name, text: "guessed the word!", isGuess: true });
           
+          // FIX: Send the actual word back to the winner so their UI reveals it!
+          socket.emit('secret_word', room.currentWord);
+
           // 3. End round early ONLY if EVERYONE has guessed the word!
           if (room.correctGuessers.length >= totalGuessers) {
             clearInterval(room.timerInterval); 
