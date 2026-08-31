@@ -460,6 +460,8 @@ io.on('connection', (socket) => {
   socket.on('redo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('redo') });
   
   socket.on('send_canvas_state', ({ targetId, canvasData }) => {
+    // FIX: Prevents "Canvas Bombing". Drops payloads over ~500KB to prevent Server RAM crashes!
+    if (typeof canvasData !== 'string' || canvasData.length > 500000) return;
     io.to(targetId).emit('load_canvas_state', canvasData);
   });
   
