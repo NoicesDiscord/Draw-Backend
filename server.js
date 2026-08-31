@@ -466,6 +466,10 @@ io.on('connection', (socket) => {
   socket.on('start_private_game', () => {
     const room = rooms[socket.roomId];
     if (room && room.isPrivate && room.hostId === socket.id && Object.keys(room.players).length >= 2) {
+      
+      // FIX: Prevents malicious DevTools spam from restarting a game that is already playing!
+      if (room.gameState !== 'waiting' && room.gameState !== 'game_over') return;
+
       room.currentRound = 1;
       room.drawQueue = Object.keys(room.players);
       room.priorityQueue = [];
@@ -478,11 +482,12 @@ io.on('connection', (socket) => {
     if (!settings || typeof settings !== 'object') return; // FIX: Safe drop for null payloads
     const room = rooms[socket.roomId];
     if (room && room.isPrivate && room.hostId === socket.id) {
-      // FIX: Server-side clamp! Forces the values to stay within safe boundaries, stopping hackers.
-      if (settings.maxRounds) room.maxRounds = Math.max(1, Math.min(10, parseInt(settings.maxRounds)));
-      if (settings.drawTime) room.drawTime = Math.max(30, Math.min(300, parseInt(settings.drawTime)));
-      if (settings.hintLevel) room.hintLevel = Math.max(1, Math.min(4, parseInt(settings.hintLevel)));
-      if (settings.maxPlayers) room.maxPlayers = Math.max(2, Math.min(8, parseInt(settings.maxPlayers)));
+      // FIX: Server-side clamp + NaN Protection! 
+      // Fallback defaults (||) guarantee the room object never gets corrupted by non-number values.
+      if (settings.maxRounds) room.maxRounds = Math.max(1, Math.min(10, parseInt(settings.maxRounds) || 3));
+      if (settings.drawTime) room.drawTime = Math.max(30, Math.min(300, parseInt(settings.drawTime) || 120));
+      if (settings.hintLevel) room.hintLevel = Math.max(1, Math.min(4, parseInt(settings.hintLevel) || 2));
+      if (settings.maxPlayers) room.maxPlayers = Math.max(2, Math.min(8, parseInt(settings.maxPlayers) || 8));
       io.to(room.id).emit('room_settings_updated', { maxRounds: room.maxRounds, drawTime: room.drawTime, hintLevel: room.hintLevel, maxPlayers: room.maxPlayers });
     }
   });
@@ -537,12 +542,18 @@ io.on('connection', (socket) => {
     broadcastPlayers(room.id);
     
     if (room.isPrivate) {
-      io.to(room.id).emit('waiting_for_host');
-    } else {
-      // Public lobbies: just send them to the waiting area
-      io.to(room.id).emit('waiting_for_players');
-    }
-  });
+        io.to(room.id).emit('waiting_for_host');
+      } else {
+        // Public lobbies: just send them to the waiting area
+        io.to(room.id).emit('waiting_for_players');
+        
+        // FIX: The Zombie Lobby Fix! 
+        // Automatically jump right into the next match if there are still enough players!
+        if (Object.keys(room.players).length >= 2) {
+           setTimeout(() => startNextTurn(room.id), 3000); // 3 second breather before round 1 starts
+        }
+      }
+    });
 
   socket.on('word_chosen', (word) => {
     // FIX: Dictionary Injection Protection! Drops massive fake words to protect CPU.
