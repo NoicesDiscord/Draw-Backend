@@ -82,8 +82,10 @@ function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime
     players: {}, currentWord: "", currentDrawerId: null,
     gameState: 'waiting', timeRemaining: 0, timerInterval: null,
     afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {},
-    correctGuessers: [], turnScores: {}, underdogs: [], // NEW: Tracks underdogs
-    availableWords: customWords && customWords.length > 0 ? [...customWords] : [...wordList]
+    correctGuessers: [], turnScores: {}, underdogs: [],
+    customWords: customWords, // FIX: Save custom words to the room state to refill later!
+    // FIX: Merges custom words WITH the base wordList instead of replacing it!
+    availableWords: customWords && customWords.length > 0 ? [...customWords, ...wordList] : [...wordList]
   };
 }
 
@@ -187,12 +189,12 @@ function startNextTurn(roomId) {
   let choices = [];
   
   for (let i = 0; i < 5; i++) {
-    // FIX: If the lobby plays so many rounds that they completely run out of words, refill the bucket!
-    if (room.availableWords.length === 0) {
-      room.availableWords = (room.customWords && room.customWords.length > 0) ? [...room.customWords] : [...wordList];
-    }
-    
-    const randIndex = Math.floor(Math.random() * room.availableWords.length);
+      // FIX: Refill the bucket securely with both custom words AND the base wordList!
+      if (room.availableWords.length === 0) {
+        room.availableWords = (room.customWords && room.customWords.length > 0) ? [...room.customWords, ...wordList] : [...wordList];
+      }
+      
+      const randIndex = Math.floor(Math.random() * room.availableWords.length);
     // Splice permanently removes the word from the available list so it can't repeat in this lobby!
     choices.push(room.availableWords.splice(randIndex, 1)[0]);
   }
