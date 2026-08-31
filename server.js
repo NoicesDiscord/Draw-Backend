@@ -802,8 +802,16 @@ socket.on('disconnect', () => {
       const remainingIds = Object.keys(room.players);
       if (remainingIds.length > 0) {
         room.hostId = remainingIds[0];
-        // FIX: Ensure the new host also gets the hint level data so their UI doesn't break
-        io.to(room.hostId).emit('room_joined', { roomId: room.id, isPrivate: true, isHost: true, maxRounds: room.maxRounds, drawTime: room.drawTime, hintLevel: room.hintLevel });
+        const newHostName = room.players[room.hostId].name;
+        
+        // FIX: Broadcast the host update to EVERYONE so their UIs sync instantly
+        io.to(room.id).emit('host_updated', room.hostId);
+        
+        // Ensure the new host gets the full updated data (including maxPlayers and password) for their settings menu
+        io.to(room.hostId).emit('room_joined', { roomId: room.id, isPrivate: true, isHost: true, maxRounds: room.maxRounds, drawTime: room.drawTime, hintLevel: room.hintLevel, maxPlayers: room.maxPlayers, password: room.password });
+        
+        // NEW: Announce the host transfer in the chat for everyone to see!
+        io.to(room.id).emit('chat_message', { sender: "System", text: `👑 The host left. ${newHostName} is now the host.`, isGuess: false });
       }
     }
 
