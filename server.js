@@ -61,17 +61,23 @@ function getOrCreatePublicRoom() {
 }
 
 function createPrivateRoom(hostId, settings) {
+  // FIX: Protect the server from DDOS! Strips out any maliciously injected words 
+  // over 50 characters so the getEditDistance algorithm doesn't freeze the backend CPU.
+  const safeCustomWords = Array.isArray(settings.customWords) 
+    ? settings.customWords.filter(w => typeof w === 'string' && w.length <= 50) 
+    : null;
+
   const newRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
   rooms[newRoomId] = createRoomObject(
     newRoomId, 
     true, 
     hostId, 
-    parseInt(settings.maxPlayers) || 8, 
-    parseInt(settings.rounds) || 3, 
-    parseInt(settings.drawTime) || 120,
-    settings.customWords,
-    parseInt(settings.hintLevel) || 2,
-    settings.password || null // NEW: Password support!
+    Math.max(2, Math.min(8, parseInt(settings.maxPlayers) || 8)), 
+    Math.max(1, Math.min(10, parseInt(settings.rounds) || 3)), 
+    Math.max(30, Math.min(300, parseInt(settings.drawTime) || 120)),
+    safeCustomWords, // Insert the sanitized array here!
+    Math.max(1, Math.min(4, parseInt(settings.hintLevel) || 2)),
+    settings.password || null
   );
   return newRoomId;
 }
@@ -472,10 +478,11 @@ io.on('connection', (socket) => {
     if (!settings || typeof settings !== 'object') return; // FIX: Safe drop for null payloads
     const room = rooms[socket.roomId];
     if (room && room.isPrivate && room.hostId === socket.id) {
-      if (settings.maxRounds) room.maxRounds = parseInt(settings.maxRounds);
-      if (settings.drawTime) room.drawTime = parseInt(settings.drawTime);
-      if (settings.hintLevel) room.hintLevel = parseInt(settings.hintLevel);
-      if (settings.maxPlayers) room.maxPlayers = parseInt(settings.maxPlayers);
+      // FIX: Server-side clamp! Forces the values to stay within safe boundaries, stopping hackers.
+      if (settings.maxRounds) room.maxRounds = Math.max(1, Math.min(10, parseInt(settings.maxRounds)));
+      if (settings.drawTime) room.drawTime = Math.max(30, Math.min(300, parseInt(settings.drawTime)));
+      if (settings.hintLevel) room.hintLevel = Math.max(1, Math.min(4, parseInt(settings.hintLevel)));
+      if (settings.maxPlayers) room.maxPlayers = Math.max(2, Math.min(8, parseInt(settings.maxPlayers)));
       io.to(room.id).emit('room_settings_updated', { maxRounds: room.maxRounds, drawTime: room.drawTime, hintLevel: room.hintLevel, maxPlayers: room.maxPlayers });
     }
   });
@@ -505,6 +512,8 @@ io.on('connection', (socket) => {
     if (room && room.isPrivate && room.hostId === socket.id && room.players[targetId]) {
       room.hostId = targetId;
       io.to(room.id).emit('host_updated', targetId);
+      // FIX: Ensure the newly manually assigned host gets the full settings payload so their UI unlocks!
+      io.to(targetId).emit('room_joined', { roomId: room.id, isPrivate: true, isHost: true, maxRounds: room.maxRounds, drawTime: room.drawTime, hintLevel: room.hintLevel, maxPlayers: room.maxPlayers, password: room.password });
       io.to(room.id).emit('chat_message', { sender: "System", text: `${room.players[targetId].name} is now the host.`, isGuess: false });
     }
   });
