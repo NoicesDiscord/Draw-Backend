@@ -626,11 +626,29 @@ io.on('connection', (socket) => {
           }
 
     } else {
-      // NEW ANTI-SPOIL SYSTEM: If you already guessed it, you can't type normal messages to spoil it for others!
+      // --- NEW: Ghost Chat for Guessers! ---
       if (room.gameState === 'drawing' && room.correctGuessers && room.correctGuessers.includes(socket.id)) {
-        return socket.emit('chat_message', { sender: "System", text: `Shh! You already guessed it. Don't spoil it for the others!`, isGuess: false });
+        const ghostMsg = { sender: player.name, text: text, isGuess: false, isGuesserChat: true };
+        
+        // Send back to the sender
+        socket.emit('chat_message', ghostMsg);
+        
+        // Send to the drawer
+        if (room.currentDrawerId) {
+          io.to(room.currentDrawerId).emit('chat_message', ghostMsg);
+        }
+        
+        // Send to all other correct guessers
+        room.correctGuessers.forEach(guesserId => {
+          if (guesserId !== socket.id) {
+            io.to(guesserId).emit('chat_message', ghostMsg);
+          }
+        });
+        
+        return; // Stops here! The clueless guessers will never receive this message.
       }
 
+      // Normal broadcast for clueless guessers or waiting phase
       io.to(room.id).emit('chat_message', { sender: player.name, text: text, isGuess: false });
       
       if (room.gameState === 'drawing' && room.currentWord && room.currentWord.length > 2) {
