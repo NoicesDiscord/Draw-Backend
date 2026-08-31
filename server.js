@@ -498,12 +498,15 @@ io.on('connection', (socket) => {
 
   const cancelAfk = (room) => { if (room && socket.id === room.currentDrawerId && room.gameState === 'drawing') clearTimeout(room.afkTimeout); };
 
-  socket.on('start', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) { cancelAfk(room); socket.to(room.id).emit('start', data); } });
-  socket.on('draw', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('draw', data) });
-  socket.on('stop', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('stop') });
+  // FIX: Backend Data Validation! Ensure the payload is an object and strictly strip out malicious injections before broadcasting.
+  const isValidDrawData = (data) => data && typeof data.x === 'number' && typeof data.y === 'number';
+
+  socket.on('start', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId && isValidDrawData(data)) { cancelAfk(room); socket.to(room.id).emit('start', { x: data.x, y: data.y, color: String(data.color).substring(0, 25), size: Number(data.size) || 5 }); } });
+  socket.on('draw', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId && isValidDrawData(data)) socket.to(room.id).emit('draw', { x: data.x, y: data.y, color: String(data.color).substring(0, 25), size: Number(data.size) || 5 }); });
+  socket.on('stop', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('stop'); });
   
   socket.on('clear_board', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) { cancelAfk(room); io.to(room.id).emit('clear_board'); } });
-  socket.on('fill', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) { cancelAfk(room); socket.to(room.id).emit('fill', data); } });
+  socket.on('fill', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId && isValidDrawData(data)) { cancelAfk(room); socket.to(room.id).emit('fill', { x: data.x, y: data.y, color: String(data.color).substring(0, 25) }); } });
   
   socket.on('undo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('undo') });
   socket.on('redo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('redo') });
