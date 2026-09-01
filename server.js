@@ -37,6 +37,8 @@ app.get('/api/validate-password', (req, res) => {
 const PUBLIC_MAX_PLAYERS = 8;
 let roomCounter = 1;
 const rooms = {}; 
+const disconnectTimeouts = {}; // NEW: Grace period timers
+const offlinePlayers = {}; // NEW: Maps sessionId to old data 
 
 const fs = require('fs');
 const path = require('path');
@@ -357,9 +359,76 @@ function startDrawingPhase(roomId, selectedWord) {
 }
 
 io.on('connection', (socket) => {
+  
+  // --- NEW: Session Restore Engine ---
+  socket.on('resume_session', (data) => {
+    const { sessionId } = data;
+    if (offlinePlayers[sessionId]) {
+      const { roomId, oldSocketId } = offlinePlayers[sessionId];
+      const room = rooms[roomId];
+
+      if (room && room.players[oldSocketId]) {
+        clearTimeout(disconnectTimeouts[sessionId]);
+        delete disconnectTimeouts[sessionId];
+        delete offlinePlayers[sessionId];
+
+        socket.join(roomId);
+        socket.roomId = roomId;
+        socket.sessionId = sessionId;
+
+        // Swap out the old socket ID for the new one in the room state
+        const newSocketId = socket.id;
+        room.players[newSocketId] = room.players[oldSocketId];
+        room.players[newSocketId].id = newSocketId;
+        room.players[newSocketId].isOffline = false;
+        delete room.players[oldSocketId];
+
+        if (room.hostId === oldSocketId) room.hostId = newSocketId;
+        if (room.currentDrawerId === oldSocketId) room.currentDrawerId = newSocketId;
+        room.drawQueue = room.drawQueue.map(id => id === oldSocketId ? newSocketId : id);
+        room.priorityQueue = room.priorityQueue.map(id => id === oldSocketId ? newSocketId : id);
+        room.correctGuessers = room.correctGuessers.map(id => id === oldSocketId ? newSocketId : id);
+        room.underdogs = room.underdogs.map(id => id === oldSocketId ? newSocketId : id);
+        
+        if (room.turnScores[oldSocketId] !== undefined) {
+          room.turnScores[newSocketId] = room.turnScores[oldSocketId];
+          delete room.turnScores[oldSocketId];
+        }
+
+        socket.emit('session_restored');
+        broadcastPlayers(roomId);
+        return;
+      }
+    }
+    socket.emit('session_restore_failed');
+  });
+
+  // --- NEW: Snapshot Request ---
+  socket.on('request_game_state', () => {
+    const room = rooms[socket.roomId];
+    if (!room) return;
+
+    socket.emit('game_state_snapshot', {
+      gameState: room.gameState,
+      currentRound: room.currentRound,
+      currentDrawerId: room.currentDrawerId,
+      drawerName: room.players[room.currentDrawerId] ? room.players[room.currentDrawerId].name : "",
+      timeRemaining: room.timeRemaining,
+      wordSkeleton: room.skeleton,
+      revealedChars: getRevealedChars(room)
+    });
+
+    // If drawing, ask the active drawer to securely send the new guy their canvas!
+    if (room.gameState === 'drawing' && room.currentDrawerId && room.currentDrawerId !== socket.id) {
+      io.to(room.currentDrawerId).emit('request_canvas_state', socket.id);
+    }
+  });
+
   socket.on('join_game', (data) => {
-    if (!data) return; // FIX: Safe drop for null payloads
+    if (!data) return; 
     const playerName = typeof data === 'string' ? data : (data.playerName || "Unknown");
+    const sessionId = data.sessionId || socket.id; // Map the stable session
+    socket.sessionId = sessionId;
     const requestedRoomId = data.roomId;
     const privateSettings = data.privateSettings;
     const providedPassword = data.password; // NEW
@@ -803,107 +872,84 @@ io.on('connection', (socket) => {
   
 socket.on('disconnect', () => {
     const room = rooms[socket.roomId];
-    if (!room) return;
+    if (!room || !room.players[socket.id]) return;
 
-    // FIX: Grab the player's name before deleting them so we can announce they left!
-    const leavingPlayerName = room.players[socket.id] ? room.players[socket.id].name : "A player";
+    // 1. Mark offline instead of deleting instantly
+    room.players[socket.id].isOffline = true;
+    broadcastPlayers(room.id);
 
-    delete room.players[socket.id];
-    room.drawQueue = room.drawQueue.filter(id => id !== socket.id);
-    room.priorityQueue = room.priorityQueue.filter(id => id !== socket.id);
+    // 2. Set Grace Period (30 seconds to reconnect from background)
+    const timeout = setTimeout(() => {
+      const leavingPlayerName = room.players[socket.id] ? room.players[socket.id].name : "A player";
 
-    // NEW: Remove them from the winners list if they had already guessed the word!
-    if (room.correctGuessers) {
-      room.correctGuessers = room.correctGuessers.filter(id => id !== socket.id);
-    }
-    
-    // EXISTING: Host Migration
-    if (room.isPrivate && socket.id === room.hostId) {
-      const remainingIds = Object.keys(room.players);
-      if (remainingIds.length > 0) {
-        room.hostId = remainingIds[0];
-        const newHostName = room.players[room.hostId].name;
-        
-        // FIX: Broadcast the host update to EVERYONE so their UIs sync instantly
-        io.to(room.id).emit('host_updated', room.hostId);
-        
-        // Ensure the new host gets the full updated data (including maxPlayers and password) for their settings menu
-        io.to(room.hostId).emit('room_joined', { roomId: room.id, isPrivate: true, isHost: true, maxRounds: room.maxRounds, drawTime: room.drawTime, hintLevel: room.hintLevel, maxPlayers: room.maxPlayers, password: room.password });
-        
-        // NEW: Announce the host transfer in the chat for everyone to see!
-        io.to(room.id).emit('chat_message', { sender: "System", text: `👑 The host left. ${newHostName} is now the host.`, isGuess: false });
+      delete room.players[socket.id];
+      room.drawQueue = room.drawQueue.filter(id => id !== socket.id);
+      room.priorityQueue = room.priorityQueue.filter(id => id !== socket.id);
+
+      if (room.correctGuessers) room.correctGuessers = room.correctGuessers.filter(id => id !== socket.id);
+      
+      if (room.isPrivate && socket.id === room.hostId) {
+        const remainingIds = Object.keys(room.players);
+        if (remainingIds.length > 0) {
+          room.hostId = remainingIds[0];
+          const newHostName = room.players[room.hostId].name;
+          io.to(room.id).emit('host_updated', room.hostId);
+          io.to(room.hostId).emit('room_joined', { roomId: room.id, isPrivate: true, isHost: true, maxRounds: room.maxRounds, drawTime: room.drawTime, hintLevel: room.hintLevel, maxPlayers: room.maxPlayers, password: room.password });
+          io.to(room.id).emit('chat_message', { sender: "System", text: `👑 The host left. ${newHostName} is now the host.`, isGuess: false });
+        }
       }
-    }
 
-    const remainingPlayers = Object.keys(room.players).length;
+      const remainingPlayers = Object.keys(room.players).length;
 
-    // EXISTING: Empty Room Cleanup
-    if (remainingPlayers === 0) {
-      clearInterval(room.timerInterval);
-      clearTimeout(room.afkTimeout);
-      delete rooms[socket.roomId];
-      return;
-    }
-
-    broadcastPlayers(room.id); 
-    // NEW: Announce the departure to the lobby so the frontend can play the leave sound!
-    io.to(room.id).emit('chat_message', { sender: "System", text: `${leavingPlayerName} left the lobby. (${remainingPlayers}/${room.maxPlayers})`, isGuess: false });
-    
-    // EXISTING: Less than 2 players left
-    if (remainingPlayers < 2) {
-      clearInterval(room.timerInterval);
-      clearTimeout(room.afkTimeout); 
-      room.gameState = 'waiting';
-      room.currentDrawerId = null;
-      room.currentWord = "";
-      if (room.isPrivate) {
-         io.to(room.id).emit('waiting_for_host');
+      if (remainingPlayers === 0) {
+        clearInterval(room.timerInterval);
+        clearTimeout(room.afkTimeout);
+        delete rooms[socket.roomId];
       } else {
-         io.to(room.id).emit('waiting_for_players');
+        broadcastPlayers(room.id); 
+        io.to(room.id).emit('chat_message', { sender: "System", text: `${leavingPlayerName} left the lobby. (${remainingPlayers}/${room.maxPlayers})`, isGuess: false });
+        
+        if (remainingPlayers < 2) {
+          clearInterval(room.timerInterval);
+          clearTimeout(room.afkTimeout); 
+          room.gameState = 'waiting';
+          room.currentDrawerId = null;
+          room.currentWord = "";
+          if (room.isPrivate) io.to(room.id).emit('waiting_for_host');
+          else io.to(room.id).emit('waiting_for_players');
+        } 
+        else if (room.gameState === 'choosing' && socket.id === room.currentDrawerId) {
+          clearInterval(room.timerInterval);
+          clearTimeout(room.afkTimeout);
+          io.to(room.id).emit('chat_message', { sender: "System", text: `The drawer left before picking a word! Skipping turn...`, isGuess: false });
+          room.currentDrawerId = null;
+          startNextTurn(room.id);
+        }
+        else if (room.gameState === 'drawing') {
+          const totalGuessers = remainingPlayers - 1;
+          if (socket.id === room.currentDrawerId) {
+            clearInterval(room.timerInterval);
+            clearTimeout(room.afkTimeout); 
+            const summaryData = Object.values(room.players).map(p => ({ name: p.name, earned: room.turnScores[p.id] || 0 })).sort((a, b) => b.earned - a.earned);
+            io.to(room.id).emit('turn_summary', { word: room.currentWord, reason: "The drawer left!", scores: summaryData });
+            io.to(room.id).emit('chat_message', { sender: "System", text: `The drawer left! The word was: ${room.currentWord}`, isGuess: false });
+            setTimeout(() => startNextTurn(room.id), 4000);
+          } else if (room.correctGuessers.length >= totalGuessers) {
+            clearInterval(room.timerInterval);
+            clearTimeout(room.afkTimeout); 
+            const summaryData = Object.values(room.players).map(p => ({ name: p.name, earned: room.turnScores[p.id] || 0 })).sort((a, b) => b.earned - a.earned);
+            io.to(room.id).emit('turn_summary', { word: room.currentWord, reason: "Everyone guessed the word!", scores: summaryData });
+            io.to(room.id).emit('chat_message', { sender: "System", text: `Everyone guessed the word! The word was: ${room.currentWord}`, isGuess: false });
+            setTimeout(() => startNextTurn(room.id), 4000);
+          }
+        }
       }
-    } 
-    // --- NEW BUG FIX: Catch if the Drawer leaves while choosing a word! ---
-    else if (room.gameState === 'choosing' && socket.id === room.currentDrawerId) {
-      clearInterval(room.timerInterval);
-      clearTimeout(room.afkTimeout);
-      
-      io.to(room.id).emit('chat_message', { 
-        sender: "System", 
-        text: `The drawer left before picking a word! Skipping turn...`, 
-        isGuess: false 
-      });
-      
-      // Clear out the current drawer and immediately move to the next turn!
-      room.currentDrawerId = null;
-      startNextTurn(room.id);
-    }
-    // NEW & UPDATED: Catch edge cases if a player leaves during a drawing phase!
-    else if (room.gameState === 'drawing') {
-      const totalGuessers = remainingPlayers - 1;
+      delete disconnectTimeouts[socket.sessionId];
+      delete offlinePlayers[socket.sessionId];
+    }, 30000); // 30 sec grace period
 
-      // Scenario A: The Drawer left
-      if (socket.id === room.currentDrawerId) {
-        clearInterval(room.timerInterval);
-        clearTimeout(room.afkTimeout); 
-        
-        const summaryData = Object.values(room.players).map(p => ({ name: p.name, earned: room.turnScores[p.id] || 0 })).sort((a, b) => b.earned - a.earned);
-        io.to(room.id).emit('turn_summary', { word: room.currentWord, reason: "The drawer left!", scores: summaryData });
-        
-        io.to(room.id).emit('chat_message', { sender: "System", text: `The drawer left! The word was: ${room.currentWord}`, isGuess: false });
-        setTimeout(() => startNextTurn(room.id), 4000);
-      } 
-      // Scenario B: The last clueless guesser left (Meaning everyone else left in the room already guessed it!)
-      else if (room.correctGuessers.length >= totalGuessers) {
-        clearInterval(room.timerInterval);
-        clearTimeout(room.afkTimeout); 
-        
-        const summaryData = Object.values(room.players).map(p => ({ name: p.name, earned: room.turnScores[p.id] || 0 })).sort((a, b) => b.earned - a.earned);
-        io.to(room.id).emit('turn_summary', { word: room.currentWord, reason: "Everyone guessed the word!", scores: summaryData });
-
-        io.to(room.id).emit('chat_message', { sender: "System", text: `Everyone guessed the word! The word was: ${room.currentWord}`, isGuess: false });
-        setTimeout(() => startNextTurn(room.id), 4000);
-      }
-    }
+    disconnectTimeouts[socket.sessionId] = timeout;
+    offlinePlayers[socket.sessionId] = { roomId: room.id, oldSocketId: socket.id };
   });
 });
 
