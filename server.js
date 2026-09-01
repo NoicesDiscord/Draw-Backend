@@ -647,6 +647,19 @@ io.on('connection', (socket) => {
 
   socket.on('start', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId && isValidDrawData(data)) { cancelAfk(room); socket.to(room.id).emit('start', { x: data.x, y: data.y, color: String(data.color).substring(0, 25), size: Number(data.size) || 5 }); } });
   socket.on('draw', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId && isValidDrawData(data)) socket.to(room.id).emit('draw', { x: data.x, y: data.y, color: String(data.color).substring(0, 25), size: Number(data.size) || 5 }); });
+  
+  // NEW: Handle batched network packets for extreme bandwidth optimization
+  socket.on('draw_packet', (data) => { 
+    const room = rooms[socket.roomId]; 
+    if(room && socket.id === room.currentDrawerId && data && Array.isArray(data.points)) { 
+      socket.to(room.id).emit('draw_packet', { 
+        points: data.points.slice(0, 50), // Security: Cap array size to prevent abuse
+        color: String(data.color).substring(0, 25), 
+        size: Number(data.size) || 5 
+      }); 
+    } 
+  });
+
   socket.on('stop', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('stop'); });
   
   socket.on('clear_board', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) { cancelAfk(room); io.to(room.id).emit('clear_board'); } });
