@@ -88,7 +88,8 @@ function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime
   return {
     id, isPrivate, hostId, maxPlayers, maxRounds, drawTime, hintLevel, password,
     players: {}, currentWord: "", currentDrawerId: null,
-    gameState: 'waiting', timeRemaining: 0, timerInterval: null,
+    gameState: 'waiting', timeRemaining: 0, endsAt: 0, timerInterval: null, // NEW: endsAt timestamp
+    drawingHistory: [], // NEW: Fast, replayable stroke state in RAM
     afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {},
     correctGuessers: [], turnScores: {}, underdogs: [],
     customWords: customWords, // FIX: Save custom words to the room state to refill later!
@@ -231,7 +232,9 @@ function startDrawingPhase(roomId, selectedWord) {
   room.gameState = 'drawing';
   room.currentWord = selectedWord;
   room.timeRemaining = room.drawTime; 
+  room.endsAt = Date.now() + (room.drawTime * 1000); // NEW: Absolute authoritative timestamp
   room.correctGuessers = []; 
+  room.drawingHistory = []; // NEW: Reset history for the new round
   
   // NEW: Calculate Underdogs based on Late Joiners!
   // Find the 3rd highest score in the lobby to balance the OP buff
@@ -324,19 +327,25 @@ function startDrawingPhase(roomId, selectedWord) {
     currentRound: room.currentRound, 
     maxRounds: room.maxRounds, 
     hintLevel: room.hintLevel,
-    underdogs: room.underdogs
+    underdogs: room.underdogs,
+    endsAt: room.endsAt // Send the authoritative end timestamp!
   });
   
   io.to(room.currentDrawerId).emit('secret_word', room.currentWord); // Only the drawer gets this!
 
+  let lastRevealedChars = "{}"; // Cache to track new hints
+
   room.timerInterval = setInterval(() => {
-    room.timeRemaining--;
+    room.timeRemaining = Math.max(0, Math.ceil((room.endsAt - Date.now()) / 1000));
     
-    // Server now calculates the hints securely and sends them with the timer!
-    io.to(roomId).emit('timer_update', { 
-      time: room.timeRemaining, 
-      revealedChars: getRevealedChars(room) 
-    }); 
+    // Only broadcast if new hints appear (Saves huge amounts of bandwidth!)
+    const currentRevealed = getRevealedChars(room);
+    const currentRevealedStr = JSON.stringify(currentRevealed);
+    
+    if (currentRevealedStr !== lastRevealedChars) {
+       lastRevealedChars = currentRevealedStr;
+       io.to(roomId).emit('hint_update', currentRevealed); 
+    }
 
     if (room.timeRemaining <= 0) {
           clearInterval(room.timerInterval);
@@ -419,15 +428,12 @@ io.on('connection', (socket) => {
       currentRound: room.currentRound,
       currentDrawerId: room.currentDrawerId,
       drawerName: room.players[room.currentDrawerId] ? room.players[room.currentDrawerId].name : "",
-      timeRemaining: room.timeRemaining,
+      endsAt: room.endsAt, // Send absolute timestamp
+      timeRemaining: room.timeRemaining, 
       wordSkeleton: room.skeleton,
-      revealedChars: getRevealedChars(room)
+      revealedChars: getRevealedChars(room),
+      drawingHistory: room.drawingHistory // Send the full fast-replay stroke history!
     });
-
-    // If drawing, ask the active drawer to securely send the new guy their canvas!
-    if (room.gameState === 'drawing' && room.currentDrawerId && room.currentDrawerId !== socket.id) {
-      io.to(room.currentDrawerId).emit('request_canvas_state', socket.id);
-    }
   });
 
   socket.on('join_game', (data) => {
@@ -468,8 +474,8 @@ io.on('connection', (socket) => {
 
     socket.join(roomId);
     socket.roomId = roomId; 
-    // NEW: Record the exact round this player joined!
-    room.players[socket.id] = { id: socket.id, name: playerName, score: 0, joinedAtRound: room.currentRound || 1 };
+    // NEW: Record the exact round this player joined, plus rate limiting stats!
+    room.players[socket.id] = { id: socket.id, name: playerName, score: 0, joinedAtRound: room.currentRound || 1, packetsThisSecond: 0, lastPacketReset: Date.now() };
     
     // --- NEW: Instantly calculate and broadcast Underdog buff for late joiners! ---
     const allScores = Object.values(room.players).map(p => p.score).sort((a, b) => b - a);
@@ -530,12 +536,12 @@ io.on('connection', (socket) => {
         currentRound: room.currentRound, 
         maxRounds: room.maxRounds, 
         hintLevel: room.hintLevel,
-        underdogs: room.underdogs
+        underdogs: room.underdogs,
+        endsAt: room.endsAt
       });
-      io.to(room.currentDrawerId).emit('request_canvas_state', socket.id);
+      // Drawer is no longer pinged for heavy JPEG screenshots!
     }
-    // Sync the current hint state instantly!
-    socket.emit('timer_update', { time: room.timeRemaining, revealedChars: getRevealedChars(room) }); 
+    socket.emit('hint_update', getRevealedChars(room)); 
   }
  
   socket.on('start_private_game', () => {
@@ -642,38 +648,97 @@ io.on('connection', (socket) => {
 
   const cancelAfk = (room) => { if (room && socket.id === room.currentDrawerId && room.gameState === 'drawing') clearTimeout(room.afkTimeout); };
 
-  // FIX: Backend Data Validation! Ensure the payload is an object and strictly strip out malicious injections before broadcasting.
-  const isValidDrawData = (data) => data && typeof data.x === 'number' && typeof data.y === 'number';
-
-  socket.on('start', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId && isValidDrawData(data)) { cancelAfk(room); socket.to(room.id).emit('start', { x: data.x, y: data.y, color: String(data.color).substring(0, 25), size: Number(data.size) || 5 }); } });
-  socket.on('draw', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId && isValidDrawData(data)) socket.to(room.id).emit('draw', { x: data.x, y: data.y, color: String(data.color).substring(0, 25), size: Number(data.size) || 5 }); });
+  // --- NEW: Strict Validation & Flood Limiting ---
+  const isValidNum = (val, min, max) => typeof val === 'number' && Number.isFinite(val) && val >= min && val <= max;
+  const isValidDrawData = (data) => data && isValidNum(data.x, -200, 1000) && isValidNum(data.y, -200, 800); 
+  const isValidSize = (size) => isValidNum(size, 1, 100);
+  const validateColor = (c) => (typeof c === 'string' && c.length <= 25) ? c.substring(0, 25) : '#000000';
   
-  // NEW: Handle batched network packets for extreme bandwidth optimization
-  socket.on('draw_packet', (data) => { 
+  const checkRateLimit = (player) => {
+    if (!player) return false;
+    const now = Date.now();
+    if (now - player.lastPacketReset > 1000) {
+      player.packetsThisSecond = 0;
+      player.lastPacketReset = now;
+    }
+    player.packetsThisSecond++;
+    return player.packetsThisSecond <= 40; // Max 40 packets per second to prevent network flooding
+  };
+
+  socket.on('start', (data) => { 
     const room = rooms[socket.roomId]; 
-    if(room && socket.id === room.currentDrawerId && data && Array.isArray(data.points)) { 
-      socket.to(room.id).emit('draw_packet', { 
-        points: data.points.slice(0, 50), // Security: Cap array size to prevent abuse
-        color: String(data.color).substring(0, 25), 
-        size: Number(data.size) || 5 
-      }); 
+    if(room && socket.id === room.currentDrawerId && isValidDrawData(data) && checkRateLimit(room.players[socket.id])) { 
+      cancelAfk(room); 
+      const cleanData = { type: 'start', x: data.x, y: data.y, color: validateColor(data.color), size: isValidSize(data.size) ? data.size : 5 };
+      room.drawingHistory.push(cleanData); // Save to replay history
+      socket.to(room.id).emit('start', cleanData); 
     } 
   });
 
-  socket.on('stop', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('stop'); });
-  
-  socket.on('clear_board', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) { cancelAfk(room); io.to(room.id).emit('clear_board'); } });
-  socket.on('fill', (data) => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId && isValidDrawData(data)) { cancelAfk(room); socket.to(room.id).emit('fill', { x: data.x, y: data.y, color: String(data.color).substring(0, 25) }); } });
-  
-  socket.on('undo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('undo') });
-  socket.on('redo', () => { const room = rooms[socket.roomId]; if(room && socket.id === room.currentDrawerId) socket.to(room.id).emit('redo') });
-  
-  socket.on('send_canvas_state', (data) => {
-    if (!data || typeof data !== 'object') return; // FIX: Prevents "Null Destructuring" DOS crashes!
-    const { targetId, canvasData } = data;
-    if (typeof canvasData !== 'string' || canvasData.length > 500000) return;
-    io.to(targetId).emit('load_canvas_state', canvasData);
+  socket.on('draw', (data) => { 
+    const room = rooms[socket.roomId]; 
+    if(room && socket.id === room.currentDrawerId && isValidDrawData(data) && checkRateLimit(room.players[socket.id])) { 
+      const cleanData = { type: 'draw', x: data.x, y: data.y, color: validateColor(data.color), size: isValidSize(data.size) ? data.size : 5 };
+      room.drawingHistory.push(cleanData);
+      socket.to(room.id).emit('draw', cleanData); 
+    } 
   });
+  
+  socket.on('draw_packet', (data) => { 
+    const room = rooms[socket.roomId]; 
+    if(room && socket.id === room.currentDrawerId && data && Array.isArray(data.points) && checkRateLimit(room.players[socket.id])) { 
+      const validPoints = data.points.filter(isValidDrawData).slice(0, 50);
+      if (validPoints.length > 0) {
+        const cleanData = { type: 'draw_packet', points: validPoints, color: validateColor(data.color), size: isValidSize(data.size) ? data.size : 5 };
+        room.drawingHistory.push(cleanData);
+        socket.to(room.id).emit('draw_packet', cleanData); 
+      }
+    } 
+  });
+
+  socket.on('stop', () => { 
+    const room = rooms[socket.roomId]; 
+    if(room && socket.id === room.currentDrawerId && checkRateLimit(room.players[socket.id])) { 
+      room.drawingHistory.push({ type: 'stop' });
+      socket.to(room.id).emit('stop'); 
+    } 
+  });
+  
+  socket.on('clear_board', () => { 
+    const room = rooms[socket.roomId]; 
+    if(room && socket.id === room.currentDrawerId && checkRateLimit(room.players[socket.id])) { 
+      cancelAfk(room); 
+      room.drawingHistory = []; // Wipe history on clear!
+      io.to(room.id).emit('clear_board'); 
+    } 
+  });
+  
+  socket.on('fill', (data) => { 
+    const room = rooms[socket.roomId]; 
+    if(room && socket.id === room.currentDrawerId && isValidDrawData(data) && checkRateLimit(room.players[socket.id])) { 
+      cancelAfk(room); 
+      const cleanData = { type: 'fill', x: data.x, y: data.y, color: validateColor(data.color) };
+      room.drawingHistory.push(cleanData);
+      socket.to(room.id).emit('fill', cleanData); 
+    } 
+  });
+  
+  socket.on('undo', () => { 
+    const room = rooms[socket.roomId]; 
+    if(room && socket.id === room.currentDrawerId && checkRateLimit(room.players[socket.id])) { 
+      room.drawingHistory.push({ type: 'undo' });
+      socket.to(room.id).emit('undo');
+    } 
+  });
+
+  socket.on('redo', () => { 
+    const room = rooms[socket.roomId]; 
+    if(room && socket.id === room.currentDrawerId && checkRateLimit(room.players[socket.id])) { 
+      room.drawingHistory.push({ type: 'redo' });
+      socket.to(room.id).emit('redo');
+    } 
+  });
+  // Old memory-heavy toDataURL canvas events safely removed!
   
   socket.on('initiate_votekick', (targetId) => {
     const room = rooms[socket.roomId];
@@ -804,7 +869,9 @@ io.on('connection', (socket) => {
 
         if (room.timeRemaining >= thresholdTime) {
           room.timeRemaining -= Math.floor(reductionAmount);
+          room.endsAt -= Math.floor(reductionAmount) * 1000; // Shift absolute time too!
           
+          io.to(room.id).emit('time_reduction', { endsAt: room.endsAt }); // Notify clients to sync
           io.to(room.id).emit('chat_message', { 
             sender: "System", 
             text: `⏰ First guess! The clock has been reduced by ${Math.floor(reductionAmount)} seconds!`, 
