@@ -395,6 +395,12 @@ io.on('connection', (socket) => {
           delete room.turnScores[oldSocketId];
         }
 
+        // FIX: Prevent Like/Dislike spam by transferring their voting lock!
+        if (room.turnVoters && room.turnVoters.has(oldSocketId)) {
+          room.turnVoters.delete(oldSocketId);
+          room.turnVoters.add(newSocketId);
+        }
+
         socket.emit('session_restored');
         broadcastPlayers(roomId);
         return;
