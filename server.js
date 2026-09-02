@@ -685,7 +685,7 @@ io.on('connection', (socket) => {
             if (room) room.drawingHistory.push({ type: 'start', ...data });
         }
     });
-
+    
     // The primary freehand transport: batch points
     socket.on('draw_packet', (data) => {
         const player = getPlayerBySocketId(socket.id);
