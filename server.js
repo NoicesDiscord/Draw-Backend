@@ -672,80 +672,93 @@ io.on('connection', (socket) => {
     return player.packetsThisSecond <= 40; // Max 40 packets per second to prevent network flooding
   };
 
-  socket.on('start', (data) => { 
-    const room = rooms[socket.roomId]; 
-    if(room && socket.id === room.currentDrawerId && isValidDrawData(data) && checkRateLimit(room.players[socket.id])) { 
-      cancelAfk(room); 
-      const cleanData = { type: 'start', x: data.x, y: data.y, color: validateColor(data.color), size: isValidSize(data.size) ? data.size : 5 };
-      pushHistory(room, cleanData); // Save to replay history
-      socket.to(room.id).emit('start', cleanData); 
-    } 
-  });
+  
+    socket.on('start', (data) => {
+        const player = getPlayerBySocketId(socket.id);
+        if (player && player.roomId) {
+            // Include drawer's canvas dimensions if you want to support varying aspect ratios later, 
+            // but for now, we rely on the frontend sending normalized (0-1) coordinates.
+            socket.to(player.roomId).emit('start', data);
+            
+            // If you are storing drawing history for late joiners:
+            const room = rooms.get(player.roomId);
+            if (room) room.drawingHistory.push({ type: 'start', ...data });
+        }
+    });
 
-  socket.on('draw', (data) => { 
-    const room = rooms[socket.roomId]; 
-    if(room && socket.id === room.currentDrawerId && isValidDrawData(data) && checkRateLimit(room.players[socket.id])) { 
-      const cleanData = { type: 'draw', x: data.x, y: data.y, color: validateColor(data.color), size: isValidSize(data.size) ? data.size : 5 };
-      pushHistory(room, cleanData);
-      socket.to(room.id).emit('draw', cleanData); 
-    } 
-  });
-  
-  socket.on('draw_packet', (data) => { 
-    const room = rooms[socket.roomId]; 
-    if(room && socket.id === room.currentDrawerId && data && Array.isArray(data.points) && checkRateLimit(room.players[socket.id])) { 
-      const validPoints = data.points.filter(isValidDrawData).slice(0, 50);
-      if (validPoints.length > 0) {
-        const cleanData = { type: 'draw_packet', points: validPoints, color: validateColor(data.color), size: isValidSize(data.size) ? data.size : 5 };
-        pushHistory(room, cleanData);
-        socket.to(room.id).emit('draw_packet', cleanData); 
-      }
-    } 
-  });
+    // The primary freehand transport: batch points
+    socket.on('draw_packet', (data) => {
+        const player = getPlayerBySocketId(socket.id);
+        if (player && player.roomId) {
+            // Forward the batch to everyone else
+            socket.to(player.roomId).emit('draw_packet', data);
+            
+            // Store for late joiners
+            const room = rooms.get(player.roomId);
+            if (room) room.drawingHistory.push({ type: 'draw_packet', ...data });
+        }
+    });
 
-  socket.on('stop', () => { 
-    const room = rooms[socket.roomId]; 
-    if(room && socket.id === room.currentDrawerId && checkRateLimit(room.players[socket.id])) { 
-      pushHistory(room, { type: 'stop' });
-      socket.to(room.id).emit('stop'); 
-    } 
-  });
-  
-  socket.on('clear_board', () => { 
-    const room = rooms[socket.roomId]; 
-    if(room && socket.id === room.currentDrawerId && checkRateLimit(room.players[socket.id])) { 
-      cancelAfk(room); 
-      room.drawingHistory = []; // Wipe history on clear!
-      room.drawingRevision++; // Increment revision for a clear event
-      io.to(room.id).emit('clear_board'); 
-    } 
-  });
-  
-  socket.on('fill', (data) => { 
-    const room = rooms[socket.roomId]; 
-    if(room && socket.id === room.currentDrawerId && isValidDrawData(data) && checkRateLimit(room.players[socket.id])) { 
-      cancelAfk(room); 
-      const cleanData = { type: 'fill', x: data.x, y: data.y, color: validateColor(data.color) };
-      pushHistory(room, cleanData);
-      socket.to(room.id).emit('fill', cleanData); 
-    } 
-  });
-  
-  socket.on('undo', () => { 
-    const room = rooms[socket.roomId]; 
-    if(room && socket.id === room.currentDrawerId && checkRateLimit(room.players[socket.id])) { 
-      pushHistory(room, { type: 'undo' });
-      socket.to(room.id).emit('undo');
-    } 
-  });
+    // For backwards compatibility or single points (can be phased out)
+    socket.on('draw', (data) => {
+         const player = getPlayerBySocketId(socket.id);
+         if (player && player.roomId) {
+             socket.to(player.roomId).emit('draw', data);
+             const room = rooms.get(player.roomId);
+             if (room) room.drawingHistory.push({ type: 'draw', ...data });
+         }
+    });
 
-  socket.on('redo', () => { 
-    const room = rooms[socket.roomId]; 
-    if(room && socket.id === room.currentDrawerId && checkRateLimit(room.players[socket.id])) { 
-      pushHistory(room, { type: 'redo' });
-      socket.to(room.id).emit('redo');
-    } 
-  });
+    // Forward the end of a stroke
+    socket.on('stop', () => {
+        const player = getPlayerBySocketId(socket.id);
+        if (player && player.roomId) {
+            socket.to(player.roomId).emit('stop');
+            
+            const room = rooms.get(player.roomId);
+            if (room) room.drawingHistory.push({ type: 'stop' });
+        }
+    });
+
+    // Fill tool
+    socket.on('fill', (data) => {
+        const player = getPlayerBySocketId(socket.id);
+        if (player && player.roomId) {
+            socket.to(player.roomId).emit('fill', data);
+            const room = rooms.get(player.roomId);
+            if (room) room.drawingHistory.push({ type: 'fill', ...data });
+        }
+    });
+    
+    // Tools
+    socket.on('undo', () => {
+        const player = getPlayerBySocketId(socket.id);
+        if (player && player.roomId) {
+            socket.to(player.roomId).emit('undo');
+            const room = rooms.get(player.roomId);
+            if (room) room.drawingHistory.push({ type: 'undo' });
+        }
+    });
+
+    socket.on('redo', () => {
+        const player = getPlayerBySocketId(socket.id);
+        if (player && player.roomId) {
+            socket.to(player.roomId).emit('redo');
+            const room = rooms.get(player.roomId);
+            if (room) room.drawingHistory.push({ type: 'redo' });
+        }
+    });
+
+    socket.on('clear_board', () => {
+        const player = getPlayerBySocketId(socket.id);
+        if (player && player.roomId) {
+            socket.to(player.roomId).emit('clear_board');
+            const room = rooms.get(player.roomId);
+            if (room) {
+                room.drawingHistory = []; // Clear history on server too!
+            }
+        }
+    });
   // Old memory-heavy toDataURL canvas events safely removed!
   
   socket.on('initiate_votekick', (targetId) => {
