@@ -88,8 +88,8 @@ function createRoomObject(id, isPrivate, hostId, maxPlayers, maxRounds, drawTime
   return {
     id, isPrivate, hostId, maxPlayers, maxRounds, drawTime, hintLevel, password,
     players: {}, currentWord: "", currentDrawerId: null,
-    gameState: 'waiting', timeRemaining: 0, endsAt: 0, timerInterval: null, // NEW: endsAt timestamp
-    drawingHistory: [], // NEW: Fast, replayable stroke state in RAM
+    gameState: 'waiting', timeRemaining: 0, endsAt: 0, timerInterval: null, 
+    drawingHistory: [], drawingRevision: 0, // NEW: Strict drawing revision tracker
     afkTimeout: null, currentRound: 1, drawQueue: [], priorityQueue: [], activeVotes: {},
     correctGuessers: [], turnScores: {}, underdogs: [],
     customWords: customWords, // FIX: Save custom words to the room state to refill later!
@@ -428,13 +428,20 @@ io.on('connection', (socket) => {
       currentRound: room.currentRound,
       currentDrawerId: room.currentDrawerId,
       drawerName: room.players[room.currentDrawerId] ? room.players[room.currentDrawerId].name : "",
-      endsAt: room.endsAt, // Send absolute timestamp
+      endsAt: room.endsAt, 
       timeRemaining: room.timeRemaining, 
       wordSkeleton: room.skeleton,
       revealedChars: getRevealedChars(room),
-      drawingHistory: room.drawingHistory // Send the full fast-replay stroke history!
+      drawingHistory: room.drawingHistory,
+      drawingRevision: room.drawingRevision // NEW: Sync revision with client
     });
   });
+
+  // NEW: Helper to securely version control drawing history
+  const pushHistory = (room, data) => {
+    room.drawingRevision++;
+    room.drawingHistory.push(data);
+  };
 
   socket.on('join_game', (data) => {
     if (!data) return; 
@@ -670,7 +677,7 @@ io.on('connection', (socket) => {
     if(room && socket.id === room.currentDrawerId && isValidDrawData(data) && checkRateLimit(room.players[socket.id])) { 
       cancelAfk(room); 
       const cleanData = { type: 'start', x: data.x, y: data.y, color: validateColor(data.color), size: isValidSize(data.size) ? data.size : 5 };
-      room.drawingHistory.push(cleanData); // Save to replay history
+      pushHistory(room, cleanData); // Save to replay history
       socket.to(room.id).emit('start', cleanData); 
     } 
   });
@@ -679,7 +686,7 @@ io.on('connection', (socket) => {
     const room = rooms[socket.roomId]; 
     if(room && socket.id === room.currentDrawerId && isValidDrawData(data) && checkRateLimit(room.players[socket.id])) { 
       const cleanData = { type: 'draw', x: data.x, y: data.y, color: validateColor(data.color), size: isValidSize(data.size) ? data.size : 5 };
-      room.drawingHistory.push(cleanData);
+      pushHistory(room, cleanData);
       socket.to(room.id).emit('draw', cleanData); 
     } 
   });
@@ -690,7 +697,7 @@ io.on('connection', (socket) => {
       const validPoints = data.points.filter(isValidDrawData).slice(0, 50);
       if (validPoints.length > 0) {
         const cleanData = { type: 'draw_packet', points: validPoints, color: validateColor(data.color), size: isValidSize(data.size) ? data.size : 5 };
-        room.drawingHistory.push(cleanData);
+        pushHistory(room, cleanData);
         socket.to(room.id).emit('draw_packet', cleanData); 
       }
     } 
@@ -699,7 +706,7 @@ io.on('connection', (socket) => {
   socket.on('stop', () => { 
     const room = rooms[socket.roomId]; 
     if(room && socket.id === room.currentDrawerId && checkRateLimit(room.players[socket.id])) { 
-      room.drawingHistory.push({ type: 'stop' });
+      pushHistory(room, { type: 'stop' });
       socket.to(room.id).emit('stop'); 
     } 
   });
@@ -709,6 +716,7 @@ io.on('connection', (socket) => {
     if(room && socket.id === room.currentDrawerId && checkRateLimit(room.players[socket.id])) { 
       cancelAfk(room); 
       room.drawingHistory = []; // Wipe history on clear!
+      room.drawingRevision++; // Increment revision for a clear event
       io.to(room.id).emit('clear_board'); 
     } 
   });
@@ -718,7 +726,7 @@ io.on('connection', (socket) => {
     if(room && socket.id === room.currentDrawerId && isValidDrawData(data) && checkRateLimit(room.players[socket.id])) { 
       cancelAfk(room); 
       const cleanData = { type: 'fill', x: data.x, y: data.y, color: validateColor(data.color) };
-      room.drawingHistory.push(cleanData);
+      pushHistory(room, cleanData);
       socket.to(room.id).emit('fill', cleanData); 
     } 
   });
@@ -726,7 +734,7 @@ io.on('connection', (socket) => {
   socket.on('undo', () => { 
     const room = rooms[socket.roomId]; 
     if(room && socket.id === room.currentDrawerId && checkRateLimit(room.players[socket.id])) { 
-      room.drawingHistory.push({ type: 'undo' });
+      pushHistory(room, { type: 'undo' });
       socket.to(room.id).emit('undo');
     } 
   });
@@ -734,7 +742,7 @@ io.on('connection', (socket) => {
   socket.on('redo', () => { 
     const room = rooms[socket.roomId]; 
     if(room && socket.id === room.currentDrawerId && checkRateLimit(room.players[socket.id])) { 
-      room.drawingHistory.push({ type: 'redo' });
+      pushHistory(room, { type: 'redo' });
       socket.to(room.id).emit('redo');
     } 
   });
