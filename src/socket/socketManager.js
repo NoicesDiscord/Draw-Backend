@@ -1,7 +1,7 @@
 const { rooms, disconnectTimeouts, offlinePlayers } = require('../state/state');
 const { getOrCreatePublicRoom, createPrivateRoom, broadcastPlayers } = require('../rooms/roomManager');
 const { startNextTurn, startDrawingPhase } = require('../game/turnManager');
-const { getRevealedChars, getEditDistance } = require('../../utils');
+const { getRevealedChars, getEditDistance } = require('../utils');
 
 module.exports = function initializeSockets(io) {
   

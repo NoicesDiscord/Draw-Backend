@@ -1,5 +1,5 @@
 const { rooms, wordList } = require('../state/state');
-const { getRevealedChars } = require('../../utils');
+const { getRevealedChars } = require('../utils');
 
 // We pass `io` into these functions so they can broadcast directly to the room
 function startNextTurn(io, roomId) {
