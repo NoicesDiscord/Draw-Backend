@@ -423,6 +423,9 @@ io.on('connection', (socket) => {
     const room = rooms[socket.roomId];
     if (!room) return;
 
+    // Map backend socket IDs to frontend player names so the frontend UI matches correctly
+    const guesserNames = (room.correctGuessers || []).map(id => room.players[id] ? room.players[id].name : id);
+
     socket.emit('game_state_snapshot', {
       gameState: room.gameState,
       currentRound: room.currentRound,
@@ -433,7 +436,8 @@ io.on('connection', (socket) => {
       wordSkeleton: room.skeleton,
       revealedChars: getRevealedChars(room),
       drawingHistory: room.drawingHistory,
-      drawingRevision: room.drawingRevision // NEW: Sync revision with client
+      drawingRevision: room.drawingRevision, // NEW: Sync revision with client
+      correctGuessers: guesserNames // Fix for reconnecting players losing their guessed status!
     });
   });
 
