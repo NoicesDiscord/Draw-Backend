@@ -991,6 +991,9 @@ socket.on('disconnect', () => {
 
     // 2. Set Grace Period (30 seconds to reconnect from background)
     const timeout = setTimeout(() => {
+      // Point 31: Double-check that this specific session didn't ALREADY successfully reconnect!
+      if (!offlinePlayers[socket.sessionId]) return;
+
       const leavingPlayerName = room.players[socket.id] ? room.players[socket.id].name : "A player";
 
       delete room.players[socket.id];
